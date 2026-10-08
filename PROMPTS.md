@@ -78,3 +78,19 @@ These prompts were asked in a planning conversation, before any checker code was
 **What came out of it:** the branch `m0-base-hygiene`. The template's demo tools, MCP panel and image attachments were removed. The model became Llama 3.3 on Workers AI, which the Free plan allows. Each visitor now gets their own Durable Object, named from a workspace id in the URL, instead of everyone sharing one instance. Vitest was added with the first tests. CI now runs the tests, and deploys main when the Cloudflare secrets are set.
 
 Testing the chat in the browser showed every streamed word twice. The raw Workers AI stream for Llama 3.3 carries each piece of text in two fields, `choices[0].delta.content` and `response`, and the `workers-ai-provider` package reads both. The chat now reads the stream from the binding directly and takes one field, with a test that pins that down. The provider package was removed.
+
+## 2026-10-08: M1, the engine and the report
+
+**Prompt:**
+
+> I think the output shape should match that of a agent reading it rather than a human, or maybe something in between. Give it steps for checks and a short note as to why. If there are no gaps, then mention warnings and structure it extremely systematically in the output. ... We won't fix code or directly change code. We just analyze, determine whether this is the intended output.
+
+**What came out of it:** the report became a contract for the coding agent that wrote the pull request, and the engine behind it was built on the branch `m1-vertical-slice`.
+
+- Fixed sections every time, in the same order: Status, Blocking, Questions, Warnings, Not checked, Intent. An empty section says "none".
+- Every finding has an id (F1, Q1, W1), a key that stays stable across runs, a quote where one exists, a reason, why the rule matters, steps the author runs on their own code, and what resolves it. UNSURE verdicts carry one question.
+- Verification in code: a verdict that claims something is present must quote a line that exists in the diff. A quote that is missing, or that matches a line the pull request removes, turns the verdict into a question. Every verified FAIL gets a second model call with only the quoted line and its neighbours in view; if that call disagrees, the FAIL becomes a question.
+- Rules are normalised once: must or must not, one file or many, and a directory scope. The scope is accepted only when the rule text names the directory, after a live run showed malformed path hints silently turning two rules off for every file.
+- The same engine answers the chat and `POST /api/check`, which takes a bearer token.
+
+Smoke-tested against this repository's own pull request #1, in the chat and over the API.

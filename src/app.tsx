@@ -3,6 +3,7 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import type { UIMessage } from "ai";
 import type { ChatAgent } from "./server";
+import type { Progress, ProgressFile } from "./checker/types";
 import {
   Button,
   Empty,
@@ -14,12 +15,15 @@ import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
 import {
   ChatCircleDotsIcon,
+  CheckCircleIcon,
   CircleIcon,
   MoonIcon,
   PaperPlaneRightIcon,
+  SpinnerGapIcon,
   StopIcon,
   SunIcon,
-  TrashIcon
+  TrashIcon,
+  XCircleIcon
 } from "@phosphor-icons/react";
 
 // One Durable Object per workspace. The id lives in the URL so the page can be
@@ -54,6 +58,54 @@ function ThemeToggle() {
       onClick={toggle}
       aria-label="Toggle theme"
     />
+  );
+}
+
+function FileState({ state }: { state: ProgressFile["state"] }) {
+  if (state === "checked") {
+    return (
+      <CheckCircleIcon size={14} weight="fill" className="text-kumo-success" />
+    );
+  }
+  if (state === "failed") {
+    return <XCircleIcon size={14} weight="fill" className="text-kumo-danger" />;
+  }
+  if (state === "checking") {
+    return (
+      <SpinnerGapIcon size={14} className="animate-spin text-kumo-default" />
+    );
+  }
+  return <CircleIcon size={14} className="text-kumo-subtle" />;
+}
+
+// One card per check, updated in place while files move through the pipeline.
+function ProgressCard({ progress }: { progress: Progress }) {
+  const done = progress.files.filter(
+    (f) => f.state === "checked" || f.state === "failed"
+  ).length;
+  return (
+    <div className="max-w-[85%] w-full rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default p-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-medium">{progress.message}</span>
+        {progress.files.length > 0 && (
+          <span className="text-kumo-subtle tabular-nums">
+            {done}/{progress.files.length}
+          </span>
+        )}
+      </div>
+      {progress.files.length > 0 && (
+        <ul className="mt-2 space-y-1 font-mono text-xs">
+          {progress.files.map((f) => (
+            <li key={f.path} className="flex items-center gap-2">
+              <FileState state={f.state} />
+              <span className={f.state === "queued" ? "text-kumo-subtle" : ""}>
+                {f.path}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -146,8 +198,15 @@ function Chat() {
             return (
               <div key={message.id} className="space-y-2">
                 {message.parts.map((part, i) => {
-                  if (part.type !== "text" || !part.text) return null;
                   const key = `${message.id}-${i}`;
+                  if (part.type === "data-check") {
+                    return (
+                      <div key={key} className="flex justify-start">
+                        <ProgressCard progress={part.data as Progress} />
+                      </div>
+                    );
+                  }
+                  if (part.type !== "text" || !part.text) return null;
 
                   if (isUser) {
                     return (
