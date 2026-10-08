@@ -53,3 +53,18 @@ These prompts were asked in a planning conversation, before any checker code was
 > We can aim for step 3 as well. But let's do step 1 and 2 in one blow and check it out.
 
 **What came out of it:** steps 1 and 2 are built together. Step 3 is decided once they work.
+
+## 2026-10-08: Scoping before the build
+
+**Prompt:**
+
+> Build steps 1 and 2 from the Design section in README.md... However, before we actually go into building, I want to see if we can scope and plan out as well as possible to build this into a strong base with potential for upward scale. How do we design for this? What are the considerations? And how can we achieve this? Are there any other approaches worth looking into to achieve a more usable PR checker, for example?
+
+**What came out of it:** a design plan. The decisions that are hard to change later were fixed before any code:
+
+- The checker is a plain module with a typed input and output. The chat, an HTTP API, a CI job, a Workflow, and an MCP server are callers of it. Nothing in the engine imports the agent or the UI.
+- Code decides, the model reports. The model emits JSON against a schema. Code verifies quotes, merges verdicts, tracks coverage, and renders the reply.
+- Verified platform numbers drove the caps: Llama 3.3 has a 24k context window and JSON Mode, so checks are per file; the Workers Free plan allows 50 external subrequests per invocation, so the file cap is 20.
+- Two problems found in the scaffold: the chosen model needs the Workers Paid plan, and the client connected every visitor to one Durable Object named `default`.
+- Evidence has two kinds. Presence is quoted and verified. Absence cannot be quoted, so its strength is the coverage of what was shown, and code downgrades it when coverage is incomplete.
+- The same engine will sit behind the chat, an HTTP endpoint for CI, and later an MCP server. Rules can also be read from a `pr-rules.md` file in the checked repository.
