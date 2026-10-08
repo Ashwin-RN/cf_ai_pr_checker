@@ -5,11 +5,16 @@ export const limits = {
   filesPerCheck: 20,
   // Fits the 24k-token window of Llama 3.3 with rules, hunks and output.
   charsPerModelCall: 40_000,
+  maxOutputTokens: 3_000,
   chunksPerFile: 6,
   hunkContextLines: 80,
   parallelModelCalls: 5,
   modelRetries: 1,
-  considerationsPerReport: 5,
+  stepsPerFinding: 4,
+  factsPerFile: 5,
+  warningsPerFile: 3,
+  warningsPerReport: 5,
+  quoteMinChars: 4,
   fileBytesMax: 1_000_000,
   fileListPagesMax: 3,
   skipPaths: [
