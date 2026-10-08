@@ -60,8 +60,8 @@ Send this in the chat:
 ```
 rules:
 No console.log or console.debug in files under src/
-Every GitHub Actions workflow pins actions to a major version tag
-No secrets, tokens or passwords are hardcoded
+Every workflow under .github/workflows/ pins actions to a major version tag
+No secret values are hardcoded; references like secrets.X are fine
 ```
 
 Then paste a public pull request link, for example `https://github.com/Ashwin-RN/cf_ai_pr_checker/pull/1`. The progress card fills in as files are checked and the report follows. `history` lists past checks.
