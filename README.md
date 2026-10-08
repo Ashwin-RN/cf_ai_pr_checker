@@ -7,16 +7,16 @@ You paste a public pull request link.
 It fetches the diff and returns pass or fail for each rule, quoting the diff line that decides it.
 It remembers your rules and every past check.
 
-**Status:** base scaffold only (Cloudflare `agents-starter` template). The checker is not built yet.
+**Status:** chat shell only. The checker is not built yet.
 
 ## How it meets the assignment
 
-| Required component      | How this app does it                                                                                                                                         | Where in the code |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- |
-| LLM                     | Llama 3.3 on Workers AI                                                                                                                                      | _to fill in_      |
-| Workflow / coordination | One Durable Object per chat runs the sequence: fetch the PR, check each file in parallel, merge. Step 3 moves the per-file checks into a Cloudflare Workflow | _to fill in_      |
-| User input via chat     | Chat UI served by the Worker                                                                                                                                 | `src/app.tsx`     |
-| Memory or state         | Rules and past checks stored in the Durable Object's SQLite storage                                                                                          | _to fill in_      |
+| Required component      | How this app does it                                                                                                                                              | Where in the code |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| LLM                     | Llama 3.3 on Workers AI                                                                                                                                           | `src/server.ts`   |
+| Workflow / coordination | One Durable Object per workspace runs the sequence: fetch the PR, check each file in parallel, merge. Step 3 moves the per-file checks into a Cloudflare Workflow | `src/server.ts`   |
+| User input via chat     | Chat UI served by the Worker                                                                                                                                      | `src/app.tsx`     |
+| Memory or state         | Rules and past checks stored in the Durable Object's SQLite storage                                                                                               | _to fill in_      |
 
 ## Design (planned, not built yet)
 
@@ -57,7 +57,9 @@ Then open http://localhost:5173.
 
 _To fill in once the checker works: example rules, an example pull request link, and the expected output._
 
-## Deployed
+## Deploy
+
+`npm run deploy` builds the app and deploys it with Wrangler. A push to `main` deploys automatically once the repository has the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 
 _To fill in: the workers.dev link._
 
