@@ -1,7 +1,7 @@
 {
   "name": "workflow-unpinned",
   "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/9",
-  "headSha": "4156d51559c1e6565781d2aa0c8bee6edd378702",
+  "headSha": "da3ef561c909f30228fb1bebcca59f8dea558f9b",
   "status": "fail",
   "rules": {
     "1": "NA",

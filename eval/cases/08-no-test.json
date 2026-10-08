@@ -1,7 +1,7 @@
 {
   "name": "no-test",
   "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/8",
-  "headSha": "d6bad1adf5d5e05f4eef74005c0ca7b6a120514a",
+  "headSha": "dc71718ef3cc063d31fc0bf9381774843b37b18c",
   "status": "fail",
   "rules": {
     "1": "PASS",
