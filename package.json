@@ -16,8 +16,9 @@
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts",
     "format": "oxfmt --write .",
-    "lint": "oxlint src/",
-    "check": "oxfmt --check . && oxlint src/ && tsc"
+    "lint": "oxlint src/ test/",
+    "test": "vitest run",
+    "check": "oxfmt --check . && oxlint src/ test/ && tsc && vitest run"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "^0.9.3",
@@ -29,7 +30,6 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.2.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -46,6 +46,7 @@
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
+    "vitest": "^5.0.3",
     "wrangler": "^4.113.0"
   },
   "allowScripts": {

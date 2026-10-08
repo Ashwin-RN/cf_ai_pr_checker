@@ -68,3 +68,13 @@ These prompts were asked in a planning conversation, before any checker code was
 - Two problems found in the scaffold: the chosen model needs the Workers Paid plan, and the client connected every visitor to one Durable Object named `default`.
 - Evidence has two kinds. Presence is quoted and verified. Absence cannot be quoted, so its strength is the coverage of what was shown, and code downgrades it when coverage is incomplete.
 - The same engine will sit behind the chat, an HTTP endpoint for CI, and later an MCP server. Rules can also be read from a `pr-rules.md` file in the checked repository.
+
+## 2026-10-08: M0, base hygiene
+
+**Prompt:**
+
+> start M0 on a branch
+
+**What came out of it:** the branch `m0-base-hygiene`. The template's demo tools, MCP panel and image attachments were removed. The model became Llama 3.3 on Workers AI, which the Free plan allows. Each visitor now gets their own Durable Object, named from a workspace id in the URL, instead of everyone sharing one instance. Vitest was added with the first tests. CI now runs the tests, and deploys main when the Cloudflare secrets are set.
+
+Testing the chat in the browser showed every streamed word twice. The raw Workers AI stream for Llama 3.3 carries each piece of text in two fields, `choices[0].delta.content` and `response`, and the `workers-ai-provider` package reads both. The chat now reads the stream from the binding directly and takes one field, with a test that pins that down. The provider package was removed.
