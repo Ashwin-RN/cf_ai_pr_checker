@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { machineReport, renderReport } from "../src/checker/report";
 import type { Finding } from "../src/checker/types";
-import { result, rule } from "./fixtures";
+import { file, result, rule, verdict } from "./fixtures";
 
 const finding: Finding = {
   id: "F1",
@@ -11,6 +11,8 @@ const finding: Finding = {
   path: "src/a.ts",
   line: 3,
   quote: "console.log(x)",
+  origin: "introduced",
+  change: null,
   summary: "Logs a value.",
   why: "Logs leak data.",
   steps: ["Remove the call.", "Run the tests."],
@@ -33,7 +35,9 @@ describe("renderReport", () => {
     ]);
     expect(md).toContain("## Blocking\n\nnone\n");
     expect(md).toContain("**PASS.** All 2 rules pass");
+    expect(md).toContain("from the rules saved in this workspace (set `hash`)");
     expect(md).toContain("How to use this report");
+    expect(md).toContain("## Intent\n\nThe pull request has no description");
     expect(md).not.toContain("Machine-readable");
   });
 
@@ -43,34 +47,151 @@ describe("renderReport", () => {
         status: "fail",
         findings: [finding],
         ruleStatuses: [
-          { rule: 1, status: "FAIL", detail: "fails in src/a.ts:3" },
-          { rule: 2, status: "PASS", detail: "passes in 1 file" }
+          {
+            rule: 1,
+            status: "FAIL",
+            blocking: true,
+            detail: "fails in src/a.ts:3"
+          },
+          {
+            rule: 2,
+            status: "PASS",
+            blocking: false,
+            detail: "passes in 1 file"
+          }
         ],
         notChecked: [
-          { path: "big.ts", reason: "no diff available (binary or too large)" }
+          {
+            path: "big.ts",
+            reason: "no diff available (binary or too large)",
+            coverage: true
+          }
+        ],
+        files: [
+          file("src/a.ts", []),
+          file("src/p.ts", [], {
+            coverage: "partial",
+            reason: "cut at the size cap"
+          }),
+          file("src/f.ts", [], { state: "failed", reason: "model error" })
         ]
       }),
       { json: true }
     );
-    expect(md).toContain("### F1 · rule 1 · src/a.ts:3 · key deadbeef");
+    expect(md).toContain("### F1 · rule 1 · src/a.ts:3 · key deadbeef\n");
     expect(md).toContain("> `console.log(x)`");
     expect(md).toContain("**Why:** Logs leak data.");
     expect(md).toContain("1. Remove the call.\n2. Run the tests.");
     expect(md).toContain("**Resolved when:** No console.log in src/a.ts.");
     expect(md).toContain("- `big.ts`: no diff available");
-    expect(md).toContain("**FAIL.** 1 of 2 rules fail.");
+    expect(md).toContain(
+      "- `src/p.ts`: partially checked, cut at the size cap"
+    );
+    expect(md).toContain("- `src/f.ts`: not checked, model error");
+    expect(md).toContain(
+      "**FAIL.** 1 of 2 rules fail on lines this pull request adds."
+    );
     const block = /```json\n([\s\S]*?)\n```/.exec(md);
     expect(block).not.toBeNull();
     const parsed = JSON.parse(block![1]);
-    expect(parsed.schema_version).toBe(1);
+    expect(parsed.schema_version).toBe(2);
     expect(parsed.findings[0].id).toBe("F1");
+    expect(parsed.rules[0].blocking).toBe(true);
     expect(parsed.rerun.api.body.prUrl).toBe("https://github.com/o/r/pull/1");
+  });
+
+  it("labels pre-existing failures and keeps the status honest", () => {
+    const md = renderReport(
+      result({
+        status: "pass",
+        findings: [{ ...finding, origin: "pre-existing" }],
+        ruleStatuses: [
+          {
+            rule: 1,
+            status: "FAIL",
+            blocking: false,
+            detail:
+              "fails in src/a.ts:3 on a line this pull request does not change"
+          },
+          {
+            rule: 2,
+            status: "PASS",
+            blocking: false,
+            detail: "passes in 1 file"
+          }
+        ]
+      }),
+      { json: false }
+    );
+    expect(md).toContain("· key deadbeef · pre-existing\n");
+    expect(md).toContain("**Origin:** pre-existing.");
+    expect(md).toContain("| 1 | No console.log | FAIL (pre-existing) |");
+    expect(md).toContain(
+      "**PASS.** No rule fails on lines this pull request adds. 1 rule fails only on lines it does not change (see Blocking)."
+    );
+  });
+
+  it("says what changed since the last check", () => {
+    const md = renderReport(
+      result({
+        status: "fail",
+        findings: [
+          { ...finding, change: "open" },
+          { ...finding, id: "F2", key: "cafebabe", change: "new" }
+        ],
+        ruleStatuses: [
+          { rule: 1, status: "FAIL", blocking: true, detail: "" },
+          { rule: 2, status: "PASS", blocking: false, detail: "" }
+        ],
+        previous: {
+          checkId: "check-0",
+          headSha: "0123456789abcdef",
+          rulesChanged: true,
+          new: 1,
+          open: 1,
+          resolved: [
+            {
+              id: "Q1",
+              key: "feedface",
+              kind: "question",
+              path: "src/b.ts",
+              summary: "s"
+            }
+          ]
+        }
+      }),
+      { json: false }
+    );
+    expect(md).toContain(
+      "Since the last check at `0123456`: 1 new, 1 still open, 1 resolved (Q1 `feedface` src/b.ts). The rules changed since then."
+    );
+    expect(md).toContain("key deadbeef · still open\n");
+    expect(md).toContain("key cafebabe · new\n");
+  });
+
+  it("renders the intent comparison", () => {
+    const md = renderReport(
+      result({
+        intent: {
+          compared: true,
+          summary: "Mostly matches.",
+          unmentioned: [
+            { path: "src/a.ts", text: "src/a.ts: adds retry", note: "" }
+          ],
+          unsupported: ["bumps the version"]
+        }
+      }),
+      { json: false }
+    );
+    expect(md).toContain(
+      "## Intent\n\nMostly matches.\n- Not in the description: src/a.ts: adds retry\n- Described but not seen in the changed files: bumps the version\n"
+    );
   });
 
   it("escapes pipes in rule text", () => {
     const r = result({
       rules: [rule(1, "a | b")],
-      ruleStatuses: [{ rule: 1, status: "NA", detail: "" }]
+      ruleStatuses: [{ rule: 1, status: "NA", blocking: false, detail: "" }]
     });
     expect(renderReport(r, { json: false })).toContain("| 1 | a \\| b | NA |");
   });
@@ -78,14 +199,28 @@ describe("renderReport", () => {
 
 describe("machineReport", () => {
   it("carries the handles an agent needs", () => {
-    const m = machineReport(result());
+    const m = machineReport(
+      result({
+        files: [file("a.ts", [verdict(1, "PASS")])],
+        modelCalls: 3,
+        strict: true
+      })
+    );
     expect(m).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       check_id: "check-1",
       status: "pass",
+      strict: true,
       pr: { head_sha: "abcdef1234567890" },
       rules_hash: "hash",
-      coverage_complete: true
+      rules_source: "the rules saved in this workspace",
+      coverage_complete: true,
+      model_calls: 3,
+      cross_file: [],
+      previous: null
     });
+    expect(
+      (m.rerun as { api: { body: { strict: boolean } } }).api.body.strict
+    ).toBe(true);
   });
 });

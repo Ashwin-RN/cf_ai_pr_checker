@@ -1,21 +1,42 @@
 import { z } from "zod";
+import { limits } from "./limits";
 import type { JsonCaller } from "./model";
 import { rulesPrompt } from "./prompts";
 import type { Rule } from "./types";
 
 const BULLET = /^\s*(?:[-*•]|\d+[.)])\s+/;
 
-// One rule per line. Bullets and numbering are stripped; blank lines are dropped.
-export function parseRuleText(text: string): string[] {
+function clean(texts: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const raw of text.replace(/^\s*rules:\s*/i, "").split(/\r?\n/)) {
-    const line = raw.replace(BULLET, "").trim();
+  for (const raw of texts) {
+    const line = raw.replace(BULLET, "").trim().slice(0, limits.ruleChars);
     if (!line || seen.has(line)) continue;
     seen.add(line);
     out.push(line);
+    if (out.length === limits.rulesMax) break;
   }
   return out;
+}
+
+// One rule per line. Bullets and numbering are stripped; blank lines are dropped.
+export function parseRuleText(text: string): string[] {
+  return clean(text.replace(/^\s*rules:\s*/i, "").split(/\r?\n/));
+}
+
+// A rules file is Markdown. Only its list items are rules; headings, prose
+// and code blocks around them are ignored.
+export function parseRulesFile(markdown: string): string[] {
+  const items: string[] = [];
+  let inFence = false;
+  for (const line of markdown.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && BULLET.test(line)) items.push(line);
+  }
+  return clean(items);
 }
 
 export const normalisedRulesSchema = z.object({
@@ -90,7 +111,11 @@ export async function normaliseRules(
 }
 
 export async function rulesHash(rules: Rule[]): Promise<string> {
-  const bytes = new TextEncoder().encode(rules.map((r) => r.text).join("\n"));
+  return hashTexts(rules.map((r) => r.text));
+}
+
+export async function hashTexts(texts: string[]): Promise<string> {
+  const bytes = new TextEncoder().encode(texts.join("\n"));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)]
     .slice(0, 8)

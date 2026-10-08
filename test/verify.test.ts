@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   annotateSteps,
   assertsPresence,
+  chunkLines,
+  fileLines,
   findQuote,
   normalise,
   parseHunks,
@@ -42,6 +44,46 @@ describe("parseHunks", () => {
   });
 });
 
+describe("fileLines", () => {
+  const content = [
+    'import a from "a";',
+    'import b from "./b";',
+    'import c from "c";',
+    "",
+    "export const x = 1;",
+    ...Array.from({ length: 15 }, (_, i) => `// ${i + 6}`),
+    "  return 1;",
+    "}",
+    "console.log(x);"
+  ].join("\n");
+
+  it("marks added lines, keeps the rest as context and shows removed lines in place", () => {
+    const full = fileLines(content + "\n", PATCH);
+    expect(full).toHaveLength(24);
+    expect(full.slice(0, 4).map((l) => [l.kind, l.line, l.text])).toEqual([
+      ["ctx", 1, 'import a from "a";'],
+      ["del", null, 'import b from "b";'],
+      ["add", 2, 'import b from "./b";'],
+      ["add", 3, 'import c from "c";']
+    ]);
+    expect(full[9]).toEqual({ kind: "ctx", line: 9, text: "// 9" });
+    expect(full[23]).toEqual({
+      kind: "add",
+      line: 23,
+      text: "console.log(x);"
+    });
+  });
+
+  it("puts a deletion at the end of the file after the last line and strips CR", () => {
+    const full = fileLines("a\r\nb\r\n", "@@ -1,3 +1,2 @@\n a\n b\n-c");
+    expect(full.map((l) => [l.kind, l.line, l.text])).toEqual([
+      ["ctx", 1, "a"],
+      ["ctx", 2, "b"],
+      ["del", null, "c"]
+    ]);
+  });
+});
+
 describe("renderHunks", () => {
   it("shows marker, line number and text, with a break between hunks", () => {
     const { text, truncated } = renderHunks(lines);
@@ -54,12 +96,49 @@ describe("renderHunks", () => {
   it("cuts at the size cap and says so", () => {
     const { text, truncated } = renderHunks(lines, 60);
     expect(truncated).toBe(true);
-    expect(text).toContain("[diff cut here");
+    expect(text).toContain("[cut here");
+  });
+});
+
+describe("chunkLines", () => {
+  const row = (i: number, kind: "add" | "ctx" = "ctx") => ({
+    kind,
+    line: i + 1,
+    text: `line ${i + 1} ${"x".repeat(40)}`
+  });
+  const big = Array.from({ length: 1000 }, (_, i) =>
+    row(i, i === 100 || i === 150 || i === 800 ? "add" : "ctx")
+  );
+
+  it("keeps a file that fits whole", () => {
+    expect(chunkLines(lines)).toEqual({ chunks: [lines], cut: false });
+  });
+
+  it("cuts a big file into windows around its changes and merges neighbours", () => {
+    const { chunks, cut } = chunkLines(big, 10_000, 30, 6);
+    expect(cut).toBe(false);
+    expect(chunks.map((c) => [c[0].line, c[c.length - 1].line])).toEqual([
+      [71, 181],
+      [771, 831]
+    ]);
+    expect(chunks[0].filter((l) => l.kind === "add")).toHaveLength(2);
+  });
+
+  it("stops at the chunk cap and reports the cut", () => {
+    const { chunks, cut } = chunkLines(big, 10_000, 10, 1);
+    expect(chunks).toHaveLength(1);
+    expect(cut).toBe(true);
+  });
+
+  it("reports the cut when one window is still over the cap", () => {
+    const { chunks, cut } = chunkLines(big, 2_000, 80, 6);
+    expect(chunks).toHaveLength(2);
+    expect(cut).toBe(true);
   });
 });
 
 describe("findQuote", () => {
-  it("matches ignoring whitespace and strips a copied prefix", () => {
+  it("matches a whole line ignoring whitespace and strips a copied prefix", () => {
     expect(
       findQuote("  console.log( x );".replace("( x )", "(x)"), lines)?.line
     ).toBe(23);
@@ -71,10 +150,16 @@ describe("findQuote", () => {
     expect(findQuote("same();", dup)).toMatchObject({ kind: "add", line: 2 });
   });
 
-  it("accepts a substring and rejects short or missing quotes", () => {
-    expect(findQuote('from "./b"', lines)?.line).toBe(2);
+  it("accepts a long substring but not a short one", () => {
+    const long = parseHunks(
+      "@@ -1 +1 @@\n+const token = process.env.SECRET_TOKEN ?? fallback; // read once"
+    );
+    expect(findQuote("process.env.SECRET_TOKEN ?? fallback", long)?.line).toBe(
+      1
+    );
+    expect(findQuote('from "./b"', lines)).toBeNull();
     expect(findQuote("x", lines)).toBeNull();
-    expect(findQuote("nothing like this", lines)).toBeNull();
+    expect(findQuote("nothing like this at all, really", lines)).toBeNull();
   });
 });
 
@@ -108,33 +193,24 @@ describe("annotateSteps", () => {
     ]);
   });
 
-  it("marks files the checker never saw and lines outside the diff", () => {
+  it("marks files the checker never saw and lines it was not shown", () => {
     expect(
       run(["Check src/other.ts and package.json", "See src/a.ts:99"])
     ).toEqual([
       "Check src/other.ts (not in this PR) and package.json (not in this PR)",
-      "See src/a.ts:99 (line not in the diff)"
+      "See src/a.ts:99 (line not shown)"
     ]);
   });
 
   it("caps the number of steps", () => {
     expect(run(["1", "2", "3", "4", "5", "6"])).toHaveLength(4);
   });
-});
 
-describe("normalise", () => {
-  it("collapses whitespace", () => {
-    expect(normalise("  a \t b\n")).toBe("a b");
-  });
-});
-
-describe("annotateSteps edge cases", () => {
   it("does not swallow a sentence period and tolerates a missing extension", () => {
-    const paths = new Set(["src/a.ts"]);
     expect(
       annotateSteps(
         ["Check for tests in test/.", "Open src/a and fix it."],
-        paths,
+        new Set(["src/a.ts"]),
         "src/a.ts",
         []
       )
@@ -142,5 +218,11 @@ describe("annotateSteps edge cases", () => {
       "Check for tests in test/ (not in this PR).",
       "Open src/a and fix it."
     ]);
+  });
+});
+
+describe("normalise", () => {
+  it("collapses whitespace", () => {
+    expect(normalise("  a \t b\n")).toBe("a b");
   });
 });

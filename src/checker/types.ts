@@ -9,6 +9,8 @@ export type Rule = {
   appliesTo: string[] | null;
 };
 
+export type RuleSet = { rules: Rule[]; hash: string; source: string };
+
 export type PrFile = {
   path: string;
   previousPath: string | null;
@@ -32,7 +34,13 @@ export type Pr = {
   fileListTruncated: boolean;
 };
 
-export type Skipped = { path: string; reason: string };
+// A file the check did not look at. `coverage` says whether that leaves a
+// gap a rule could hide in.
+export type Skipped = { path: string; reason: string; coverage: boolean };
+
+// Where a failing line comes from: a line this pull request adds, or one it
+// leaves as it was.
+export type Origin = "introduced" | "pre-existing";
 
 export type FileVerdict = {
   rule: number;
@@ -40,6 +48,7 @@ export type FileVerdict = {
   quote: string | null;
   line: number | null;
   verified: boolean;
+  origin: Origin | null;
   reason: string;
   why: string;
   steps: string[];
@@ -58,12 +67,36 @@ export type FileWarning = {
 export type FileCheck = {
   path: string;
   state: "checked" | "failed";
+  coverage: "full" | "partial";
   reason: string | null;
+  chunks: number;
   purpose: string;
   verdicts: FileVerdict[];
   facts: string[];
   warnings: FileWarning[];
   raw: string | null;
+};
+
+export type Fact = { index: number; path: string; text: string };
+
+// One rule settled from the facts of every file, for rules no single file can decide.
+export type CrossFileVerdict = {
+  rule: number;
+  verdict: Verdict;
+  facts: Fact[];
+  reason: string;
+  why: string;
+  steps: string[];
+  resolution: string | null;
+  question: string | null;
+  note: string | null;
+};
+
+export type Intent = {
+  compared: boolean;
+  summary: string;
+  unmentioned: Array<{ path: string; text: string; note: string }>;
+  unsupported: string[];
 };
 
 export type FindingKind = "blocking" | "question" | "warning";
@@ -76,6 +109,8 @@ export type Finding = {
   path: string;
   line: number | null;
   quote: string | null;
+  origin: Origin | null;
+  change: "new" | "open" | null;
   summary: string;
   why: string;
   steps: string[];
@@ -84,11 +119,39 @@ export type Finding = {
   note: string | null;
 };
 
-export type RuleStatus = { rule: number; status: Verdict; detail: string };
+export type RuleStatus = {
+  rule: number;
+  status: Verdict;
+  blocking: boolean;
+  detail: string;
+};
 export type CheckStatus = "pass" | "fail" | "unsure";
 
+// What the last finished check of the same pull request found.
+export type PreviousRun = {
+  checkId: string;
+  headSha: string;
+  rulesHash: string;
+  findings: Array<{
+    id: string;
+    key: string;
+    kind: FindingKind;
+    path: string;
+    summary: string;
+  }>;
+};
+
+export type RunDiff = {
+  checkId: string;
+  headSha: string;
+  rulesChanged: boolean;
+  new: number;
+  open: number;
+  resolved: PreviousRun["findings"];
+};
+
 export type CheckResult = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   workspace: string;
   pr: {
@@ -100,10 +163,15 @@ export type CheckResult = {
     headSha: string;
   };
   rulesHash: string;
+  rulesSource: string;
   rules: Rule[];
+  strict: boolean;
   status: CheckStatus;
   ruleStatuses: RuleStatus[];
   findings: Finding[];
+  crossFile: CrossFileVerdict[];
+  intent: Intent;
+  previous: RunDiff | null;
   files: FileCheck[];
   notChecked: Skipped[];
   coverageComplete: boolean;

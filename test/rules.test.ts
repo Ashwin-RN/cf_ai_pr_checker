@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { limits } from "../src/checker/limits";
 import type { JsonCaller } from "../src/checker/model";
 import {
   defaultRules,
   normaliseRules,
   parseRuleText,
+  parseRulesFile,
   ruleApplies,
   rulesHash,
   scopeFrom
@@ -157,5 +159,34 @@ describe("normaliseRules scope", () => {
       } as never
     });
     expect((await normaliseRules(["No secrets"], call))[0].scope).toBe("file");
+  });
+});
+
+describe("parseRulesFile", () => {
+  it("takes only list items, outside code blocks, and caps them", () => {
+    const md = [
+      "# Rules",
+      "",
+      "Prose that is not a rule.",
+      "",
+      "- No console.log in src/",
+      "* Every route has a test",
+      "1. No `TODO` without an issue link",
+      "",
+      "```",
+      "- not a rule, it is in a code block",
+      "```",
+      "- No console.log in src/"
+    ].join("\n");
+    expect(parseRulesFile(md)).toEqual([
+      "No console.log in src/",
+      "Every route has a test",
+      "No `TODO` without an issue link"
+    ]);
+    const many = Array.from({ length: 40 }, (_, i) => `- rule ${i}`).join("\n");
+    expect(parseRulesFile(many)).toHaveLength(limits.rulesMax);
+    expect(parseRulesFile(`- ${"x".repeat(500)}`)[0]).toHaveLength(
+      limits.ruleChars
+    );
   });
 });

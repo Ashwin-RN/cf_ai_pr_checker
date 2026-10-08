@@ -25,6 +25,10 @@ export function parsePrUrl(input: string): PrRef | null {
   return { owner: match[1], repo: match[2], number };
 }
 
+export function canonicalPrUrl(ref: PrRef): string {
+  return `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`;
+}
+
 // The first GitHub pull request link anywhere in a message.
 export function findPrUrl(text: string): string | null {
   for (const m of text.matchAll(
@@ -67,15 +71,17 @@ type FileJson = {
   patch?: string;
 };
 
-async function github<T>(deps: GithubDeps, path: string): Promise<T> {
-  const headers: Record<string, string> = {
-    accept: "application/vnd.github+json",
+function headers(deps: GithubDeps, accept: string): Record<string, string> {
+  const h: Record<string, string> = {
+    accept,
     "user-agent": "cf-ai-pr-checker",
     "x-github-api-version": "2022-11-28"
   };
-  if (deps.token) headers.authorization = `Bearer ${deps.token}`;
-  const res = await deps.fetch(`https://api.github.com${path}`, { headers });
-  if (res.ok) return (await res.json()) as T;
+  if (deps.token) h.authorization = `Bearer ${deps.token}`;
+  return h;
+}
+
+function throwFor(res: Response, what: string): never {
   if (res.status === 404) {
     throw new GithubError(
       "not_found",
@@ -95,7 +101,15 @@ async function github<T>(deps: GithubDeps, path: string): Promise<T> {
       resetAt
     );
   }
-  throw new GithubError("error", `GitHub answered ${res.status} for ${path}.`);
+  throw new GithubError("error", `GitHub answered ${res.status} for ${what}.`);
+}
+
+async function github<T>(deps: GithubDeps, path: string): Promise<T> {
+  const res = await deps.fetch(`https://api.github.com${path}`, {
+    headers: headers(deps, "application/vnd.github+json")
+  });
+  if (res.ok) return (await res.json()) as T;
+  return throwFor(res, path);
 }
 
 // Pull request metadata plus the changed files with their patches.
@@ -135,4 +149,39 @@ export async function fetchPr(ref: PrRef, deps: GithubDeps): Promise<Pr> {
     files,
     fileListTruncated
   };
+}
+
+export type RawFile =
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
+
+function rawUrl(ref: PrRef, at: string, path: string): string {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  return `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${at}/${encoded}`;
+}
+
+// One file as it is at a commit or branch, within the size cap and not binary.
+export async function fetchRawFile(
+  ref: PrRef,
+  at: string,
+  path: string,
+  deps: GithubDeps
+): Promise<RawFile> {
+  const res = await deps.fetch(rawUrl(ref, at, path), {
+    headers: headers(deps, "text/plain")
+  });
+  if (res.status === 404) return { ok: false, reason: "not found" };
+  if (!res.ok) throwFor(res, `${path} at ${at.slice(0, 7)}`);
+  const length = Number(res.headers.get("content-length") ?? 0);
+  if (length > limits.fileBytesMax) {
+    return { ok: false, reason: `over ${limits.fileBytesMax} bytes` };
+  }
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (bytes.byteLength > limits.fileBytesMax) {
+    return { ok: false, reason: `over ${limits.fileBytesMax} bytes` };
+  }
+  if (bytes.subarray(0, 8000).includes(0)) {
+    return { ok: false, reason: "binary" };
+  }
+  return { ok: true, text: new TextDecoder().decode(bytes) };
 }

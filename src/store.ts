@@ -1,4 +1,10 @@
-import type { CheckResult, FileCheck, Rule } from "./checker/types";
+import type {
+  CheckResult,
+  FileCheck,
+  PreviousRun,
+  Rule,
+  RuleSet
+} from "./checker/types";
 
 type Value = string | number | boolean | null;
 export type Sql = <T = Record<string, Value>>(
@@ -31,32 +37,57 @@ export class Store {
       raw_model_output TEXT, PRIMARY KEY (check_id, path))`;
   }
 
-  saveRules(rules: Rule[], hash: string, source: string): void {
+  // A normalised rule set, keyed by the hash of its text. Saving the same
+  // text again replaces the interpretation.
+  putRuleSet(set: RuleSet): void {
     this
       .sql`INSERT OR REPLACE INTO rule_sets (hash, rules_json, source, created_at)
-      VALUES (${hash}, ${JSON.stringify(rules)}, ${source}, ${Date.now()})`;
+      VALUES (${set.hash}, ${JSON.stringify(set.rules)}, ${set.source}, ${Date.now()})`;
+  }
+
+  getRuleSet(hash: string): RuleSet | null {
+    const row = this.sql<{ rules_json: string; source: string }>`
+      SELECT rules_json, source FROM rule_sets WHERE hash = ${hash}`[0];
+    return row
+      ? {
+          rules: JSON.parse(row.rules_json) as Rule[],
+          hash,
+          source: row.source
+        }
+      : null;
+  }
+
+  // The workspace's own rules: saved from the chat or the API, used when the
+  // checked repository has no rules file.
+  saveRules(rules: Rule[], hash: string, source: string): void {
+    this.putRuleSet({ rules, hash, source });
     this.sql`INSERT INTO settings (key, value) VALUES ('rules_hash', ${hash})
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
   }
 
-  currentRules(): { rules: Rule[]; hash: string } | null {
-    const row = this.sql<{ hash: string; rules_json: string }>`
-      SELECT r.hash, r.rules_json FROM settings s JOIN rule_sets r ON r.hash = s.value
+  currentRules(): RuleSet | null {
+    const row = this.sql<{ hash: string; rules_json: string; source: string }>`
+      SELECT r.hash, r.rules_json, r.source FROM settings s JOIN rule_sets r ON r.hash = s.value
       WHERE s.key = 'rules_hash'`[0];
     return row
-      ? { rules: JSON.parse(row.rules_json) as Rule[], hash: row.hash }
+      ? {
+          rules: JSON.parse(row.rules_json) as Rule[],
+          hash: row.hash,
+          source: row.source
+        }
       : null;
   }
 
-  startCheck(id: string, prUrl: string, rulesHash: string): void {
+  startCheck(id: string, prUrl: string): void {
     this.sql`INSERT INTO checks (id, pr_url, rules_hash, status, started_at)
-      VALUES (${id}, ${prUrl}, ${rulesHash}, 'running', ${Date.now()})`;
+      VALUES (${id}, ${prUrl}, '', 'running', ${Date.now()})`;
   }
 
   finishCheck(result: CheckResult): void {
     this
       .sql`UPDATE checks SET status = ${result.status}, finished_at = ${result.finishedAt},
-      result_json = ${JSON.stringify(result)} WHERE id = ${result.id}`;
+      rules_hash = ${result.rulesHash}, result_json = ${JSON.stringify(result)}
+      WHERE id = ${result.id}`;
   }
 
   failCheck(id: string, error: string): void {
@@ -78,6 +109,27 @@ export class Store {
     return row?.result_json
       ? (JSON.parse(row.result_json) as CheckResult)
       : null;
+  }
+
+  // The last finished check of the same pull request, for the run-to-run diff.
+  previousCheck(prUrl: string): PreviousRun | null {
+    const row = this.sql<{ result_json: string | null }>`
+      SELECT result_json FROM checks WHERE pr_url = ${prUrl} AND result_json IS NOT NULL
+      ORDER BY started_at DESC LIMIT 1`[0];
+    if (!row?.result_json) return null;
+    const r = JSON.parse(row.result_json) as CheckResult;
+    return {
+      checkId: r.id,
+      headSha: r.pr.headSha,
+      rulesHash: r.rulesHash,
+      findings: r.findings.map((f) => ({
+        id: f.id,
+        key: f.key,
+        kind: f.kind,
+        path: f.path,
+        summary: f.summary
+      }))
+    };
   }
 
   listChecks(limit = 20): CheckRow[] {

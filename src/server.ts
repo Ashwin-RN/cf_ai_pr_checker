@@ -6,11 +6,22 @@ import {
   type UIMessage
 } from "ai";
 import { CheckError, runCheck } from "./checker";
-import { findPrUrl } from "./checker/github";
+import {
+  GithubError,
+  canonicalPrUrl,
+  fetchRawFile,
+  findPrUrl,
+  parsePrUrl
+} from "./checker/github";
 import { jsonCaller, workersAiText } from "./checker/model";
 import { machineReport, renderReport } from "./checker/report";
-import { normaliseRules, parseRuleText, rulesHash } from "./checker/rules";
-import type { CheckResult, Progress, Rule } from "./checker/types";
+import {
+  hashTexts,
+  normaliseRules,
+  parseRuleText,
+  parseRulesFile
+} from "./checker/rules";
+import type { CheckResult, Pr, Progress, Rule, RuleSet } from "./checker/types";
 import { Store, type Sql } from "./store";
 import { streamChatResponse, toChatMessages } from "./workers-ai";
 
@@ -24,12 +35,13 @@ declare global {
 export type CheckMessage = UIMessage<unknown, { check: Progress }>;
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const RULES_FILE = "pr-rules.md";
 const WORKSPACE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CHAT_HISTORY = 12;
 const CHAT_MESSAGE_CHARS = 4_000;
 
 const SYSTEM_PROMPT = `You are the chat side of a pull request checker that runs on Cloudflare.
-How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. The checker fetches the diff, checks every changed file against each rule with one model call per file, verifies every quoted line in code, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. "history" lists past checks.
+How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks.
 Answer questions about that briefly. You cannot run a check yourself and must never claim to have checked anything.`;
 
 function json(data: unknown, status = 200): Response {
@@ -70,7 +82,7 @@ function rulesMarkdown(rules: Rule[], hash: string): string {
     return `| ${r.id} | ${r.text.replace(/\|/g, "\\|")} | ${reads} | ${scope} | ${applies} |`;
   });
   return [
-    `Saved ${rules.length} rule${rules.length === 1 ? "" : "s"} as set \`${hash}\`. Paste a pull request link to run them.`,
+    `Saved ${rules.length} rule${rules.length === 1 ? "" : "s"} as set \`${hash}\`. Paste a pull request link to run them. A \`${RULES_FILE}\` file in the checked repository takes precedence.`,
     "",
     "| # | Rule | Reads as | Scope | Applies to |",
     "| --- | --- | --- | --- | --- |",
@@ -84,6 +96,12 @@ function apiBody(result: CheckResult): Record<string, unknown> {
     report_markdown: renderReport(result, { json: false })
   };
 }
+
+type CheckOptions = {
+  rules?: RuleSet | null;
+  strict?: boolean;
+  onProgress?: (progress: Progress) => void;
+};
 
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
@@ -136,10 +154,12 @@ export class ChatAgent extends AIChatAgent<Env> {
       const body = (await request.json().catch(() => null)) as {
         prUrl?: unknown;
         rules?: unknown;
+        strict?: unknown;
       } | null;
       if (!body || typeof body.prUrl !== "string") {
         return json({ error: "Body must be JSON with a prUrl string." }, 400);
       }
+      let rules: RuleSet | null = null;
       if (body.rules !== undefined) {
         const texts = Array.isArray(body.rules)
           ? body.rules.filter((x): x is string => typeof x === "string")
@@ -152,10 +172,14 @@ export class ChatAgent extends AIChatAgent<Env> {
             400
           );
         }
-        await this.saveRules(texts, "api");
+        rules = await this.saveRules(texts, "the rules sent with the request");
       }
       try {
-        return json(apiBody(await this.check(crypto.randomUUID(), body.prUrl)));
+        const result = await this.check(crypto.randomUUID(), body.prUrl, {
+          rules,
+          strict: body.strict === true
+        });
+        return json(apiBody(result));
       } catch (e) {
         if (!(e instanceof CheckError)) throw e;
         const status =
@@ -192,11 +216,50 @@ export class ChatAgent extends AIChatAgent<Env> {
     return jsonCaller(workersAiText(this.env.AI, MODEL));
   }
 
-  private async saveRules(texts: string[], source: string) {
+  // Interprets rule text once per distinct text: the same text, already
+  // normalised, is read back from the store.
+  private async normalise(texts: string[], source: string): Promise<RuleSet> {
+    const hash = await hashTexts(texts);
+    const known = this.store.getRuleSet(hash);
+    if (known) return { ...known, source };
     const rules = await normaliseRules(texts, this.callJson());
-    const hash = await rulesHash(rules);
-    this.store.saveRules(rules, hash, source);
-    return { rules, hash };
+    const set = { rules, hash, source };
+    this.store.putRuleSet(set);
+    return set;
+  }
+
+  private async saveRules(texts: string[], source: string): Promise<RuleSet> {
+    const set = await this.normalise(texts, source);
+    this.store.saveRules(set.rules, set.hash, source);
+    return set;
+  }
+
+  // Rules from the checked repository come first; the workspace's own are
+  // the fallback.
+  private async resolveRules(pr: Pr): Promise<RuleSet | null> {
+    let file: Awaited<ReturnType<typeof fetchRawFile>>;
+    try {
+      file = await fetchRawFile(pr, pr.baseRef, RULES_FILE, {
+        fetch: (input, init) => fetch(input, init),
+        token: this.env.GITHUB_TOKEN
+      });
+    } catch (e) {
+      if (e instanceof GithubError) throw new CheckError(e.kind, e.message);
+      throw e;
+    }
+    if (file.ok) {
+      const texts = parseRulesFile(file.text);
+      if (texts.length) {
+        return this.normalise(
+          texts,
+          `${RULES_FILE} in ${pr.owner}/${pr.repo} (${pr.baseRef})`
+        );
+      }
+    }
+    const current = this.store.currentRules();
+    return current
+      ? { ...current, source: "the rules saved in this workspace" }
+      : null;
   }
 
   private async rulesResponse(text: string): Promise<Response> {
@@ -204,7 +267,10 @@ export class ChatAgent extends AIChatAgent<Env> {
     if (!texts.length) {
       return reply("Write one rule per line after `rules:`.");
     }
-    const { rules, hash } = await this.saveRules(texts, "chat");
+    const { rules, hash } = await this.saveRules(
+      texts,
+      "the rules saved in this chat"
+    );
     return reply(rulesMarkdown(rules, hash));
   }
 
@@ -226,18 +292,18 @@ export class ChatAgent extends AIChatAgent<Env> {
     const stream = createUIMessageStream<CheckMessage>({
       execute: async ({ writer }) => {
         const id = crypto.randomUUID();
-        const progress = (data: Progress) =>
+        const onProgress = (data: Progress) =>
           writer.write({ type: "data-check", id: `check-${id}`, data });
         let markdown: string;
         try {
-          const result = await this.check(id, prUrl, progress);
+          const result = await this.check(id, prUrl, { onProgress });
           markdown = renderReport(result, { json: false });
         } catch (e) {
           markdown =
             e instanceof CheckError
               ? e.message
               : `The check failed: ${(e as Error).message}`;
-          progress({
+          onProgress({
             checkId: id,
             stage: "error",
             message: markdown,
@@ -258,37 +324,47 @@ export class ChatAgent extends AIChatAgent<Env> {
   private async check(
     id: string,
     prUrl: string,
-    onProgress?: (progress: Progress) => void
+    options: CheckOptions
   ): Promise<CheckResult> {
-    const current = this.store.currentRules();
-    if (!current) {
+    const ref = parsePrUrl(prUrl);
+    if (!ref) {
       throw new CheckError(
-        "no_rules",
-        "Save rules first: send a message that starts with `rules:` and has one rule per line."
+        "bad_url",
+        "That is not a GitHub pull request link. Expected https://github.com/owner/repo/pull/123."
       );
     }
-    this.store.startCheck(id, prUrl, current.hash);
+    const canonical = canonicalPrUrl(ref);
+    const previous = this.store.previousCheck(canonical);
+    this.store.startCheck(id, canonical);
     try {
       const result = await runCheck(
         {
           id,
           workspace: this.name,
-          prUrl,
-          rules: current.rules,
-          rulesHash: current.hash
+          prUrl: canonical,
+          rules: options.rules ?? null,
+          strict: options.strict,
+          previous
         },
         {
           fetch: (input, init) => fetch(input, init),
           callJson: this.callJson(),
           githubToken: this.env.GITHUB_TOKEN,
-          onProgress,
-          onFile: (file) => this.store.saveFileResult(id, file)
+          onProgress: options.onProgress,
+          onFile: (file) => this.store.saveFileResult(id, file),
+          resolveRules: (pr) => this.resolveRules(pr)
         }
       );
       this.store.finishCheck(result);
       return result;
     } catch (e) {
       this.store.failCheck(id, (e as Error).message);
+      if (e instanceof CheckError && e.kind === "no_rules") {
+        throw new CheckError(
+          "no_rules",
+          `No rules to check against: the repository has no ${RULES_FILE} and this workspace has no saved rules. Send a message that starts with \`rules:\` and has one rule per line.`
+        );
+      }
       throw e;
     }
   }

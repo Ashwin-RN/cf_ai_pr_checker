@@ -1,0 +1,65 @@
+name: PR check
+
+# Runs this repository's own checker against each pull request, using the
+# rules in pr-rules.md, and keeps one comment on the pull request up to date.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CHECKER_URL: ${{ secrets.CHECKER_URL }}
+      CHECKER_API_TOKEN: ${{ secrets.CHECKER_API_TOKEN }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - if: env.CHECKER_URL == '' || env.CHECKER_API_TOKEN == ''
+        run: echo "::notice::CHECKER_URL and CHECKER_API_TOKEN are not set, so this pull request is not checked."
+
+      - if: env.CHECKER_URL != '' && env.CHECKER_API_TOKEN != ''
+        id: check
+        run: |
+          code=$(curl -sS -o result.json -w '%{http_code}' \
+            -X POST "$CHECKER_URL/api/check" \
+            -H "authorization: Bearer $CHECKER_API_TOKEN" \
+            -H "content-type: application/json" \
+            -d "$(jq -cn --arg url "$PR_URL" '{prUrl: $url, workspace: "ci"}')")
+          if [ "$code" != 200 ]; then
+            echo "::error::The checker answered $code: $(cat result.json)"
+            exit 1
+          fi
+          jq -r .report_markdown result.json > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "status=$(jq -r .status result.json)" >> "$GITHUB_OUTPUT"
+
+      - if: steps.check.outcome == 'success' && env.SAME_REPO == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          marker='<!-- cf-ai-pr-checker -->'
+          { echo "$marker"; echo; head -c 60000 report.md; } > comment.md
+          if [ "$(wc -c < report.md)" -gt 60000 ]; then
+            echo "[cut: the full report is in the job summary]" >> comment.md
+          fi
+          id=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq ".[] | select(.user.type == \"Bot\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@comment.md > /dev/null
+          fi
+
+      - if: steps.check.outputs.status == 'fail'
+        run: |
+          echo "::error::The pull request fails a rule. See the PR check comment or the job summary."
+          exit 1
