@@ -1,0 +1,13 @@
+{
+  "name": "mechanical",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/6",
+  "headSha": "00f2e7a894d79e2718e11f4bb66d78e8f5b40ff4",
+  "status": "fail",
+  "rules": {
+    "1": "PASS",
+    "2": "NA",
+    "3": "PASS",
+    "4": "PASS",
+    "5": "FAIL"
+  }
+}

@@ -89,16 +89,17 @@ export function ruleApplies(rule: Rule, path: string): boolean {
   );
 }
 
-// One model call interprets every rule. If it fails, the defaults stand.
-export async function normaliseRules(
+// One model call interprets every rule. Null when the call failed, so the
+// caller can decide whether to keep the defaults.
+export async function interpretRules(
   texts: string[],
   callJson: JsonCaller
-): Promise<Rule[]> {
-  const fallback = defaultRules(texts);
-  if (texts.length === 0) return fallback;
+): Promise<Rule[] | null> {
+  const defaults = defaultRules(texts);
+  if (texts.length === 0) return defaults;
   const result = await callJson(rulesPrompt(texts), normalisedRulesSchema);
-  if (!result.ok || result.value.rules.length !== texts.length) return fallback;
-  return fallback.map((rule, i) => {
+  if (!result.ok || result.value.rules.length !== texts.length) return null;
+  return defaults.map((rule, i) => {
     const n = result.value.rules[i];
     return {
       ...rule,
@@ -108,6 +109,14 @@ export async function normaliseRules(
       appliesTo: scopeFrom(n.applies_to, rule.text)
     };
   });
+}
+
+// The interpretation, or the defaults when the call failed.
+export async function normaliseRules(
+  texts: string[],
+  callJson: JsonCaller
+): Promise<Rule[]> {
+  return (await interpretRules(texts, callJson)) ?? defaultRules(texts);
 }
 
 export async function rulesHash(rules: Rule[]): Promise<string> {

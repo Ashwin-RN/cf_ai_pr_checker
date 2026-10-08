@@ -26,7 +26,14 @@ export class Store {
 
   init(): void {
     this.sql`CREATE TABLE IF NOT EXISTS rule_sets (
-      hash TEXT PRIMARY KEY, rules_json TEXT NOT NULL, source TEXT NOT NULL, created_at INTEGER NOT NULL)`;
+      hash TEXT PRIMARY KEY, rules_json TEXT NOT NULL, source TEXT NOT NULL, created_at INTEGER NOT NULL,
+      interpreted INTEGER NOT NULL DEFAULT 1)`;
+    try {
+      this
+        .sql`ALTER TABLE rule_sets ADD COLUMN interpreted INTEGER NOT NULL DEFAULT 1`;
+    } catch {
+      // The column is already there.
+    }
     this
       .sql`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS checks (
@@ -38,16 +45,18 @@ export class Store {
   }
 
   // A normalised rule set, keyed by the hash of its text. Saving the same
-  // text again replaces the interpretation.
-  putRuleSet(set: RuleSet): void {
+  // text again replaces the interpretation. A set the model could not
+  // interpret is kept for use but read back only as the workspace's rules,
+  // so the next save tries the model again.
+  putRuleSet(set: RuleSet, interpreted = true): void {
     this
-      .sql`INSERT OR REPLACE INTO rule_sets (hash, rules_json, source, created_at)
-      VALUES (${set.hash}, ${JSON.stringify(set.rules)}, ${set.source}, ${Date.now()})`;
+      .sql`INSERT OR REPLACE INTO rule_sets (hash, rules_json, source, created_at, interpreted)
+      VALUES (${set.hash}, ${JSON.stringify(set.rules)}, ${set.source}, ${Date.now()}, ${interpreted ? 1 : 0})`;
   }
 
   getRuleSet(hash: string): RuleSet | null {
     const row = this.sql<{ rules_json: string; source: string }>`
-      SELECT rules_json, source FROM rule_sets WHERE hash = ${hash}`[0];
+      SELECT rules_json, source FROM rule_sets WHERE hash = ${hash} AND interpreted = 1`[0];
     return row
       ? {
           rules: JSON.parse(row.rules_json) as Rule[],
@@ -59,8 +68,9 @@ export class Store {
 
   // The workspace's own rules: saved from the chat or the API, used when the
   // checked repository has no rules file.
-  saveRules(rules: Rule[], hash: string, source: string): void {
-    this.putRuleSet({ rules, hash, source });
+  saveRules(set: RuleSet, interpreted: boolean): void {
+    this.putRuleSet(set, interpreted);
+    const hash = set.hash;
     this.sql`INSERT INTO settings (key, value) VALUES ('rules_hash', ${hash})
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
   }

@@ -18,6 +18,7 @@
     "format": "oxfmt --write .",
     "lint": "oxlint src/ test/",
     "test": "vitest run",
+    "eval": "node eval/run.ts",
     "check": "oxfmt --check . && oxlint src/ test/ && tsc && vitest run"
   },
   "dependencies": {

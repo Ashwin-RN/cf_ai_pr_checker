@@ -1,0 +1,13 @@
+{
+  "name": "big-file",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/11",
+  "headSha": "d69331b88c2e9320fd3cb81b25d35817601ce367",
+  "status": "fail",
+  "rules": {
+    "1": "FAIL",
+    "2": "NA",
+    "3": "PASS",
+    "4": "NA",
+    "5": "PASS"
+  }
+}

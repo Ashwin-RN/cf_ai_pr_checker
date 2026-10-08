@@ -3,6 +3,7 @@ import { limits } from "../src/checker/limits";
 import type { JsonCaller } from "../src/checker/model";
 import {
   defaultRules,
+  interpretRules,
   normaliseRules,
   parseRuleText,
   parseRulesFile,
@@ -94,6 +95,16 @@ describe("normaliseRules", () => {
       appliesTo: ["src/"]
     });
     expect(rules[1]).toMatchObject({ scope: "cross_file", appliesTo: null });
+  });
+
+  it("reports a failed interpretation as null, and the defaults otherwise", async () => {
+    const failing: JsonCaller = async () => ({
+      ok: false,
+      error: "x",
+      raw: null
+    });
+    expect(await interpretRules(texts, failing)).toBeNull();
+    expect(await interpretRules([], failing)).toEqual([]);
   });
 
   it("falls back to defaults when the call fails or the count is off", async () => {

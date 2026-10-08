@@ -1,0 +1,16 @@
+{
+  "name": "pre-existing",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/7",
+  "headSha": "23366cafb7928190e7846798f447c90763d48c15",
+  "status": "pass",
+  "rules": {
+    "1": "FAIL",
+    "2": "NA",
+    "3": "PASS",
+    "4": "PASS",
+    "5": "PASS"
+  },
+  "blocking": {
+    "1": false
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "injection",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/3",
+  "headSha": "c86d002970f0e17ed602ae1993fab367821c2f80",
+  "status": "fail",
+  "rules": {
+    "1": "FAIL",
+    "2": "NA",
+    "3": "PASS",
+    "4": "PASS",
+    "5": "PASS"
+  }
+}

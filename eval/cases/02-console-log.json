@@ -1,0 +1,13 @@
+{
+  "name": "console-log",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/2",
+  "headSha": "5851b27e9ca2a32ff5fdbda2673388b314ada4ed",
+  "status": "fail",
+  "rules": {
+    "1": "FAIL",
+    "2": "NA",
+    "3": "PASS",
+    "4": "PASS",
+    "5": "PASS"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "clean",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/1",
+  "headSha": "df3097f7dd7d3fbc0f5f95e7f32c819a0b05a1e6",
+  "status": "pass",
+  "rules": {
+    "1": "PASS",
+    "2": "NA",
+    "3": "PASS",
+    "4": "PASS",
+    "5": "PASS"
+  }
+}

@@ -16,8 +16,9 @@ import {
 import { jsonCaller, workersAiText } from "./checker/model";
 import { machineReport, renderReport } from "./checker/report";
 import {
+  defaultRules,
   hashTexts,
-  normaliseRules,
+  interpretRules,
   parseRuleText,
   parseRulesFile
 } from "./checker/rules";
@@ -34,6 +35,7 @@ declare global {
 
 export type CheckMessage = UIMessage<unknown, { check: Progress }>;
 
+// The default model. The AI_MODEL variable overrides it.
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const RULES_FILE = "pr-rules.md";
 const WORKSPACE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -73,7 +75,11 @@ function lastUserText(messages: UIMessage[]): string {
   );
 }
 
-function rulesMarkdown(rules: Rule[], hash: string): string {
+function rulesMarkdown(
+  rules: Rule[],
+  hash: string,
+  interpreted: boolean
+): string {
   const rows = rules.map((r) => {
     const reads = r.polarity === "must_not" ? "must not" : "must";
     const scope = r.scope === "cross_file" ? "may span files" : "one file";
@@ -81,8 +87,11 @@ function rulesMarkdown(rules: Rule[], hash: string): string {
       r.appliesTo?.map((g) => `\`${g}\``).join(", ") ?? "everywhere";
     return `| ${r.id} | ${r.text.replace(/\|/g, "\\|")} | ${reads} | ${scope} | ${applies} |`;
   });
+  const caveat = interpreted
+    ? ""
+    : ' The model could not interpret them this time, so each reads as "must not" when it contains a negation and applies everywhere; save them again to retry.';
   return [
-    `Saved ${rules.length} rule${rules.length === 1 ? "" : "s"} as set \`${hash}\`. Paste a pull request link to run them. A \`${RULES_FILE}\` file in the checked repository takes precedence.`,
+    `Saved ${rules.length} rule${rules.length === 1 ? "" : "s"} as set \`${hash}\`. Paste a pull request link to run them. A \`${RULES_FILE}\` file in the checked repository takes precedence.${caveat}`,
     "",
     "| # | Rule | Reads as | Scope | Applies to |",
     "| --- | --- | --- | --- | --- |",
@@ -138,7 +147,7 @@ export class ChatAgent extends AIChatAgent<Env> {
     );
     return streamChatResponse(
       this.env.AI,
-      MODEL,
+      this.model(),
       [
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${context}` },
         ...history
@@ -172,7 +181,8 @@ export class ChatAgent extends AIChatAgent<Env> {
             400
           );
         }
-        rules = await this.saveRules(texts, "the rules sent with the request");
+        rules = (await this.saveRules(texts, "the rules sent with the request"))
+          .set;
       }
       try {
         const result = await this.check(crypto.randomUUID(), body.prUrl, {
@@ -212,26 +222,37 @@ export class ChatAgent extends AIChatAgent<Env> {
     return this.store.getCheck(id);
   }
 
+  private model(): string {
+    return (this.env as { AI_MODEL?: string }).AI_MODEL || MODEL;
+  }
+
   private callJson() {
-    return jsonCaller(workersAiText(this.env.AI, MODEL));
+    return jsonCaller(workersAiText(this.env.AI, this.model()));
   }
 
   // Interprets rule text once per distinct text: the same text, already
-  // normalised, is read back from the store.
-  private async normalise(texts: string[], source: string): Promise<RuleSet> {
+  // interpreted, is read back from the store. A failed interpretation is
+  // not kept, so the next save tries again.
+  private async normalise(
+    texts: string[],
+    source: string
+  ): Promise<{ set: RuleSet; interpreted: boolean }> {
     const hash = await hashTexts(texts);
     const known = this.store.getRuleSet(hash);
-    if (known) return { ...known, source };
-    const rules = await normaliseRules(texts, this.callJson());
-    const set = { rules, hash, source };
-    this.store.putRuleSet(set);
-    return set;
+    if (known) return { set: { ...known, source }, interpreted: true };
+    const rules = await interpretRules(texts, this.callJson());
+    const set = { rules: rules ?? defaultRules(texts), hash, source };
+    if (rules) this.store.putRuleSet(set);
+    return { set, interpreted: rules !== null };
   }
 
-  private async saveRules(texts: string[], source: string): Promise<RuleSet> {
-    const set = await this.normalise(texts, source);
-    this.store.saveRules(set.rules, set.hash, source);
-    return set;
+  private async saveRules(
+    texts: string[],
+    source: string
+  ): Promise<{ set: RuleSet; interpreted: boolean }> {
+    const out = await this.normalise(texts, source);
+    this.store.saveRules(out.set, out.interpreted);
+    return out;
   }
 
   // Rules from the checked repository come first; the workspace's own are
@@ -250,10 +271,11 @@ export class ChatAgent extends AIChatAgent<Env> {
     if (file.ok) {
       const texts = parseRulesFile(file.text);
       if (texts.length) {
-        return this.normalise(
+        const { set } = await this.normalise(
           texts,
           `${RULES_FILE} in ${pr.owner}/${pr.repo} (${pr.baseRef})`
         );
+        return set;
       }
     }
     const current = this.store.currentRules();
@@ -267,11 +289,11 @@ export class ChatAgent extends AIChatAgent<Env> {
     if (!texts.length) {
       return reply("Write one rule per line after `rules:`.");
     }
-    const { rules, hash } = await this.saveRules(
+    const { set, interpreted } = await this.saveRules(
       texts,
       "the rules saved in this chat"
     );
-    return reply(rulesMarkdown(rules, hash));
+    return reply(rulesMarkdown(set.rules, set.hash, interpreted));
   }
 
   private historyMarkdown(): string {
