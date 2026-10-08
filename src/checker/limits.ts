@@ -20,7 +20,7 @@ export const limits = {
   // A quote matches a whole line, or a substring once it is long enough not
   // to match by accident.
   quoteMinChars: 4,
-  quoteSubstringMinChars: 20,
+  quoteSubstringMinChars: 12,
   rulesMax: 30,
   ruleChars: 300,
   descriptionChars: 4_000,

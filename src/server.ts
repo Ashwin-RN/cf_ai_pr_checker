@@ -257,10 +257,11 @@ export class ChatAgent extends AIChatAgent<Env> {
 
   // Rules from the checked repository come first; the workspace's own are
   // the fallback.
-  private async resolveRules(pr: Pr): Promise<RuleSet | null> {
+  // The rules file at a commit or branch, as rule texts; null without one.
+  private async rulesFileAt(pr: Pr, at: string): Promise<string[] | null> {
     let file: Awaited<ReturnType<typeof fetchRawFile>>;
     try {
-      file = await fetchRawFile(pr, pr.baseRef, RULES_FILE, {
+      file = await fetchRawFile(pr, at, RULES_FILE, {
         fetch: (input, init) => fetch(input, init),
         token: this.env.GITHUB_TOKEN
       });
@@ -268,12 +269,27 @@ export class ChatAgent extends AIChatAgent<Env> {
       if (e instanceof GithubError) throw new CheckError(e.kind, e.message);
       throw e;
     }
-    if (file.ok) {
-      const texts = parseRulesFile(file.text);
-      if (texts.length) {
+    if (!file.ok) return null;
+    const texts = parseRulesFile(file.text);
+    return texts.length ? texts : null;
+  }
+
+  private async resolveRules(pr: Pr): Promise<RuleSet | null> {
+    const fromBase = await this.rulesFileAt(pr, pr.baseRef);
+    if (fromBase) {
+      const { set } = await this.normalise(
+        fromBase,
+        `${RULES_FILE} in ${pr.owner}/${pr.repo} (${pr.baseRef})`
+      );
+      return set;
+    }
+    // A pull request that adds the rules file is checked against it.
+    if (pr.files.some((f) => f.path === RULES_FILE)) {
+      const fromHead = await this.rulesFileAt(pr, pr.headSha);
+      if (fromHead) {
         const { set } = await this.normalise(
-          texts,
-          `${RULES_FILE} in ${pr.owner}/${pr.repo} (${pr.baseRef})`
+          fromHead,
+          `${RULES_FILE} added by this pull request`
         );
         return set;
       }

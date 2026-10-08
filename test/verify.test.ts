@@ -157,6 +157,11 @@ describe("findQuote", () => {
     expect(findQuote("process.env.SECRET_TOKEN ?? fallback", long)?.line).toBe(
       1
     );
+    expect(
+      findQuote("console.log(x);", [
+        { kind: "add", line: 1, text: "f(x) { console.log(x); return x; }" }
+      ])?.line
+    ).toBe(1);
     expect(findQuote('from "./b"', lines)).toBeNull();
     expect(findQuote("x", lines)).toBeNull();
     expect(findQuote("nothing like this at all, really", lines)).toBeNull();

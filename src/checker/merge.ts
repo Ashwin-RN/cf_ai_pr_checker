@@ -173,6 +173,14 @@ export function ruleStatuses(
         detail: "no file could be checked"
       };
     }
+    if (!complete) {
+      return {
+        rule: rule.id,
+        status: "UNSURE",
+        blocking: false,
+        detail: `not triggered by the checked files; not checked: ${listed(gaps)}`
+      };
+    }
     return {
       rule: rule.id,
       status: "NA",

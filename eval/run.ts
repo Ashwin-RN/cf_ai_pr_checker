@@ -3,8 +3,11 @@
 // PASS or NA; the run exits non-zero if there is one.
 //
 //   CHECKER_URL=http://localhost:5173 API_TOKEN=dev-token npm run eval
-//   npm run eval -- --only secret
-import { readdirSync, readFileSync } from "node:fs";
+//   npm run eval -- --only secret --out eval/out
+//
+// EVAL_WORKSPACE names the workspace (default "eval"); --out writes each
+// response as JSON into a directory.
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Expected = "PASS" | "FAIL" | "UNSURE" | "NA";
@@ -31,8 +34,14 @@ type Out = {
 
 const url = process.env.CHECKER_URL ?? "http://localhost:5173";
 const token = process.env.API_TOKEN ?? "dev-token";
-const onlyAt = process.argv.indexOf("--only");
-const only = onlyAt === -1 ? null : process.argv[onlyAt + 1];
+const workspace = process.env.EVAL_WORKSPACE ?? "eval";
+const arg = (name: string): string | null => {
+  const at = process.argv.indexOf(name);
+  return at === -1 ? null : (process.argv[at + 1] ?? null);
+};
+const only = arg("--only");
+const outDir = arg("--out");
+if (outDir) mkdirSync(outDir, { recursive: true });
 
 const dir = join(import.meta.dirname, "cases");
 const cases: Case[] = readdirSync(dir)
@@ -70,12 +79,15 @@ async function runCase(c: Case): Promise<Row> {
     },
     body: JSON.stringify({
       prUrl: c.prUrl,
-      workspace: "eval",
+      workspace,
       strict: c.strict ?? false
     })
   });
   const seconds = Math.round((Date.now() - started) / 100) / 10;
   const out = (await res.json()) as Out;
+  if (outDir) {
+    writeFileSync(join(outDir, `${c.name}.json`), JSON.stringify(out, null, 2));
+  }
   if (!res.ok) {
     return {
       name: c.name,

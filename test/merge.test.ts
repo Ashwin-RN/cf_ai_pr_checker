@@ -111,6 +111,16 @@ describe("ruleStatuses", () => {
     expect(
       ruleStatuses(rules, [file("a.ts", [verdict(1, "NA")])], [])[0].status
     ).toBe("NA");
+    expect(
+      ruleStatuses(
+        rules,
+        [file("a.ts", [verdict(1, "NA")])],
+        [{ path: "b.ts", reason: "cap", coverage: true }]
+      )[0]
+    ).toMatchObject({
+      status: "UNSURE",
+      detail: "not triggered by the checked files; not checked: b.ts"
+    });
     expect(ruleStatuses(rules, [], [])[0]).toMatchObject({
       status: "UNSURE",
       detail: "no file could be checked"
