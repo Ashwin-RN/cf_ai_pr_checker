@@ -147,6 +147,15 @@ describe("stages", () => {
     expect(plain.calls()).toBe(1);
   });
 
+  it("adds the rules' own interpretation calls to the total", async () => {
+    const plain = await runCheck(input, deps);
+    const interpreted = await runCheck(input, {
+      ...deps,
+      resolveRules: async () => ({ ...ruleSet, calls: 1 })
+    });
+    expect(interpreted.modelCalls).toBe(plain.modelCalls + 1);
+  });
+
   it("snapshots progress so later changes do not leak into it", () => {
     const files: ProgressFile[] = [{ path: "a", state: "queued" }];
     const snap = progressFor("c1", "checking", "m", files);

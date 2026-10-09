@@ -476,7 +476,9 @@ export function assemble(a: Assembly): CheckResult {
     coverageComplete:
       notChecked.every((n) => !n.coverage) &&
       results.every((r) => r.state === "checked" && r.coverage === "full"),
-    modelCalls: a.modelCalls,
+    // The rules were interpreted before the stages ran, so their calls
+    // arrive on the set.
+    modelCalls: a.modelCalls + (ruleSet.calls ?? 0),
     startedAt: a.startedAt,
     finishedAt: a.finishedAt
   };

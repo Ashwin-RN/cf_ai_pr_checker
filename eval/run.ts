@@ -35,6 +35,10 @@ const cases: Case[] = readdirSync(dir)
   .sort()
   .map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")) as Case)
   .filter((c) => !only || c.name.includes(only));
+if (cases.length === 0) {
+  console.error(only ? `No case matches --only ${only}.` : "No cases found.");
+  process.exit(1);
+}
 
 async function runCase(c: Case): Promise<Row> {
   const started = Date.now();

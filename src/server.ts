@@ -5,7 +5,7 @@ import {
   createUIMessageStreamResponse,
   type UIMessage
 } from "ai";
-import { CheckError, type CheckInput, runCheck } from "./checker";
+import { CheckError, type CheckInput, countCalls, runCheck } from "./checker";
 import {
   GithubError,
   canonicalPrUrl,
@@ -385,8 +385,14 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     const hash = await hashTexts(texts);
     const known = this.store.getRuleSet(hash);
     if (known) return { set: { ...known, source }, interpreted: true };
-    const rules = await interpretRules(texts, this.callJson());
-    const set = { rules: rules ?? defaultRules(texts), hash, source };
+    const counted = countCalls(this.callJson());
+    const rules = await interpretRules(texts, counted.callJson);
+    const set = {
+      rules: rules ?? defaultRules(texts),
+      hash,
+      source,
+      calls: counted.calls()
+    };
     if (rules) this.store.putRuleSet(set);
     return { set, interpreted: rules !== null };
   }

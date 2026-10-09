@@ -89,7 +89,17 @@ export function score(
     const blockingWant = c.blocking?.[id];
     const blockingOk =
       blockingWant === undefined || got.blocking === blockingWant;
-    if (same(got.status, want) && blockingOk) continue;
+    if (same(got.status, want)) {
+      if (blockingOk) continue;
+      // The verdict is right and the policy is not. A rule that should
+      // block and does not lets the pull request through.
+      row.wrong.push(
+        `${id}: ${blockingWant ? "does not block but should" : "blocks but should not"}`
+      );
+      if (blockingWant) row.falsePass++;
+      else row.falseFail++;
+      continue;
+    }
     row.wrong.push(
       `${id}: ${got.status}${got.blocking ? "" : got.status === "FAIL" ? " (pre-existing)" : ""} not ${want}`
     );
@@ -103,6 +113,16 @@ export function score(
     } else if (want === "FAIL" && got.status === "UNSURE") {
       row.missed++;
     }
+  }
+  // The status is what CI reads, so it is scored in its own right: a check
+  // that should fail or stay unsure but passes is a false PASS whatever the
+  // rules said. One cause counts once.
+  if (out.status === "pass" && c.status !== "pass") {
+    row.wrong.push(`status: pass not ${c.status}`);
+    if (row.falsePass === 0) row.falsePass++;
+  } else if (out.status === "fail" && c.status === "pass") {
+    row.wrong.push("status: fail not pass");
+    if (row.falseFail === 0) row.falseFail++;
   }
   return row;
 }

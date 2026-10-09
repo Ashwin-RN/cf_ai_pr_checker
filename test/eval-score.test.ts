@@ -45,7 +45,7 @@ describe("score", () => {
     expect(failed([row])).toBe(false);
   });
 
-  it("counts a false PASS and fails the run on it", () => {
+  it("counts a false PASS once and fails the run on it", () => {
     const row = score(
       c,
       ok,
@@ -58,9 +58,74 @@ describe("score", () => {
       }),
       1
     );
-    expect(row.wrong).toEqual(["4: PASS not FAIL"]);
+    expect(row.wrong).toEqual(["4: PASS not FAIL", "status: pass not fail"]);
     expect(row.falsePass).toBe(1);
     expect(failed([row])).toBe(true);
+  });
+
+  it("fails the run when the rules are right but the status lets the pull request through", () => {
+    const row = score(
+      c,
+      ok,
+      answer({
+        status: "pass",
+        rules: [
+          { id: 1, status: "PASS", blocking: false },
+          { id: 4, status: "FAIL", blocking: false }
+        ]
+      }),
+      1
+    );
+    expect(row.wrong).toEqual(["status: pass not fail"]);
+    expect(row.falsePass).toBe(1);
+    expect(failed([row])).toBe(true);
+  });
+
+  it("counts a rule that should block and does not as a false PASS", () => {
+    const strict: Case = { ...c, blocking: { "4": true } };
+    const row = score(
+      strict,
+      ok,
+      answer({
+        status: "pass",
+        rules: [
+          { id: 1, status: "PASS", blocking: false },
+          { id: 4, status: "FAIL", blocking: false }
+        ]
+      }),
+      1
+    );
+    expect(row.wrong).toEqual([
+      "4: does not block but should",
+      "status: pass not fail"
+    ]);
+    expect(row.falsePass).toBe(1);
+    expect(failed([row])).toBe(true);
+  });
+
+  it("counts a rule that blocks and should not as a false FAIL, which does not fail the run", () => {
+    const preExisting: Case = {
+      ...c,
+      status: "pass",
+      rules: { "1": "FAIL" },
+      blocking: { "1": false }
+    };
+    const row = score(
+      preExisting,
+      ok,
+      answer({
+        status: "fail",
+        rules: [{ id: 1, status: "FAIL", blocking: true }]
+      }),
+      1
+    );
+    expect(row.wrong).toEqual([
+      "1: blocks but should not",
+      "status: fail not pass"
+    ]);
+    expect(row.falseFail).toBe(1);
+    expect(row.falsePass).toBe(0);
+    expect(failed([row])).toBe(false);
   });
 
   it("marks an HTTP error as broken, not as a clean row", () => {
@@ -81,7 +146,6 @@ describe("score", () => {
       "rule 1 is missing from the answer",
       "rule 4 is missing from the answer"
     ]);
-    expect(row.falsePass).toBe(0);
     expect(failed([row])).toBe(true);
   });
 

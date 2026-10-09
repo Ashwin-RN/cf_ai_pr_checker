@@ -9,7 +9,14 @@ export type Rule = {
   appliesTo: string[] | null;
 };
 
-export type RuleSet = { rules: Rule[]; hash: string; source: string };
+// `calls` is the model calls spent interpreting the rules for this check.
+// A set read back from the cache spends none.
+export type RuleSet = {
+  rules: Rule[];
+  hash: string;
+  source: string;
+  calls?: number;
+};
 
 export type PrFile = {
   path: string;

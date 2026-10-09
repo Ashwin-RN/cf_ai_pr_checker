@@ -6,9 +6,9 @@ name: PR check
 # and a draft is pushed to often.
 #
 # Two status checks come out of it, so branch protection can require either.
-# "rules" fails when a rule fails on a line the pull request adds; "verified"
-# fails unless every rule was verified to pass. A check that did not run
-# fails both.
+# "rules" fails when a rule fails on a line the pull request adds. "verified"
+# fails unless every changed file was checked and every rule passed; a check
+# that did not run, or a checker that is not configured, fails it too.
 
 on:
   pull_request:
@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       status: ${{ steps.check.outputs.status }}
+      verified: ${{ steps.check.outputs.verified }}
     env:
       CHECKER_URL: ${{ secrets.CHECKER_URL }}
       CHECKER_API_TOKEN: ${{ secrets.CHECKER_API_TOKEN }}
@@ -51,9 +52,13 @@ jobs:
           jq -r .report_markdown result.json > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           status=$(jq -r .status result.json)
+          # Verified means more than a passing status: every changed file
+          # was checked, and no rule failed anywhere, pre-existing included.
+          verified=$(jq -r '(.status == "pass") and .coverage_complete and all(.rules[]; .status == "PASS" or .status == "NA")' result.json)
           echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "verified=$verified" >> "$GITHUB_OUTPUT"
           case "$status" in
-            pass) echo "::notice::Every rule passes on every checked file." ;;
+            pass) echo "::notice::No rule fails on any checked file." ;;
             unsure) echo "::warning::Not every rule could be verified. See Questions and Not checked in the report." ;;
             fail) echo "::error::A rule fails on a line this pull request adds. See Blocking in the report." ;;
           esac
@@ -103,11 +108,12 @@ jobs:
     env:
       RESULT: ${{ needs.check.result }}
       STATUS: ${{ needs.check.outputs.status }}
+      VERIFIED: ${{ needs.check.outputs.verified }}
     steps:
       - run: |
-          case "$RESULT/$STATUS" in
-            success/) echo "::notice::Not checked: the checker is not configured." ;;
-            success/pass) echo "Every rule verified." ;;
-            success/*) echo "::error::Not every rule was verified to pass: the check ended $STATUS. See the PR check comment or the job summary."; exit 1 ;;
+          case "$RESULT/$VERIFIED" in
+            success/true) echo "Every changed file was checked and every rule passed." ;;
+            success/false) echo "::error::Not verified: the check ended $STATUS, but not every changed file was checked with every rule passing. See the PR check comment or the job summary."; exit 1 ;;
+            success/) echo "::error::Not verified: the checker is not configured."; exit 1 ;;
             *) echo "::error::The check did not run."; exit 1 ;;
           esac

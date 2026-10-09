@@ -86,13 +86,13 @@ curl -X POST https://cf-ai-pr-checker.ashwin-rn.workers.dev/api/check \
   -d '{"prUrl":"https://github.com/owner/repo/pull/123","workspace":"ci"}'
 ```
 
-`rules` (a string or an array of strings) is optional and, when given, is used for this check and saved for the workspace. `strict: true` makes pre-existing failures block. `workspace` defaults to `api`. API workspaces are a name space of their own: one cannot be opened from the chat, and a chat workspace cannot be named over the API. The response is the JSON block described above plus `report_markdown`. `GET /api/checks/<check_id>?workspace=ci` returns a stored result.
+`rules` (a string or an array of strings) is optional and, when given, is used for this check and saved for the workspace. `strict: true` makes pre-existing failures block. `workspace` defaults to `api`. API workspaces are a name space of their own: one cannot be opened from the chat, and a chat workspace cannot be named over the API. A deployment upgraded from before this name space starts its API workspaces empty; the old history stays under the old instance names, which nothing reads. The response is the JSON block described above plus `report_markdown`. `GET /api/checks/<check_id>?workspace=ci` returns a stored result.
 
 For local development, put `API_TOKEN=...` in `.dev.vars`.
 
 ## CI
 
-[`.github/workflows/pr-check.yml`](.github/workflows/pr-check.yml) runs on every pull request to this repository once it is out of draft. It posts the pull request to the deployed Worker, writes the report to the job summary, and keeps one comment on the pull request up to date with it. Two status checks come out of it: `rules` fails when a rule fails on a line the pull request adds, and `verified` fails unless every rule was verified to pass, so `unsure` is red there. Branch protection can require either: `rules` to block a merge on a failing rule, `verified` to block it until every rule is verified. A pull request over the file cap cannot turn `verified` green. The workflow needs two repository secrets, `CHECKER_URL` and `CHECKER_API_TOKEN`; without them it prints a notice and both checks pass. Pull requests from forks get the job summary only, since their token cannot write comments.
+[`.github/workflows/pr-check.yml`](.github/workflows/pr-check.yml) runs on every pull request to this repository once it is out of draft. It posts the pull request to the deployed Worker, writes the report to the job summary, and keeps one comment on the pull request up to date with it. Two status checks come out of it: `rules` fails when a rule fails on a line the pull request adds, and `verified` fails unless every changed file was checked and every rule passed, so `unsure`, a file over the cap and a pre-existing failure are all red there. Branch protection can require either: `rules` to block a merge on a failing rule, `verified` to block it until everything is verified. The workflow needs two repository secrets, `CHECKER_URL` and `CHECKER_API_TOKEN`; without them `rules` prints a notice and passes, and `verified` fails, since nothing was verified. Pull requests from forks are not checked, because secrets are not available to them.
 
 ## Evaluation
 
@@ -102,7 +102,7 @@ For local development, put `API_TOKEN=...` in `.dev.vars`.
 CHECKER_URL=http://localhost:5173 API_TOKEN=dev-token npm run eval
 ```
 
-It prints one row per case and exits non-zero on any false PASS, a rule that should have failed or needed an answer but came back PASS, and on any case it could not score: an error from the checker, a rule missing from the answer, or a fixture whose head commit has moved.
+It prints one row per case and exits non-zero on any false PASS: a rule that should have failed or needed an answer but came back PASS, a rule that should block and does not, or a check that should fail or stay unsure and passes. It also exits non-zero on any case it could not score: an error from the checker, a rule missing from the answer, a fixture whose head commit has moved, or a `--only` that matches nothing.
 
 The results table is still to be added: the first full run against the fixtures is waiting on a day of Workers AI budget, which one run uses up.
 

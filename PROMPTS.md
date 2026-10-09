@@ -157,3 +157,15 @@ The Workers AI cap from the day before had not lifted at 03:00 UTC despite the d
 - The evaluation runner scores through `eval/score.ts`, which has its own tests, and exits non-zero on any case it could not score: an error from the checker, a rule missing from the answer, or a fixture whose head has moved. Before, such a run exited green.
 - `pr-check.yml` skips drafts, since a push to a draft is frequent and each check spends a share of the day's model budget. It now ends in two status checks, `rules` and `verified`, so branch protection can require a failing rule to block, or require every rule to be verified; `unsure` is red on the second. A skipped job counts as passing for a required check, so both run whenever the check job did and read how it ended.
 - A `.gitattributes` keeps the working tree on LF, which ends the format check failing on a Windows checkout.
+
+**Prompt:**
+
+> [a second review, pasted without comment, of the commit `d750cea`]
+
+**What came out of it:** five more changes on the same branch, since the review found the harness not yet honest in five places.
+
+- The `verified` status check read only the overall status, which a pre-existing failure beside a file over the cap can leave at pass. It now reads the JSON block: every changed file checked, no rule FAIL anywhere, and it is red when the checker is not configured, since nothing was verified then.
+- The evaluation scores the overall status and the blocking policy in their own right: a check that should fail or stay unsure but passes, or a rule that should block and does not, is a false PASS even when every rule verdict was right. One cause counts once.
+- The model call that interprets the rules happens before the stages and was not counted; the count now travels on the rule set, so a check that interpreted its rules reports one call more than one that read them from the cache.
+- `--only` that matches no case is an error, not a green run over nothing.
+- The README says that a deployment upgraded across the name-space change starts its API workspaces empty, and that pull requests from forks are not checked, since secrets are not available to them.
