@@ -25,7 +25,8 @@ const finding = (id: string, key: string): Finding => ({
   steps: [],
   resolution: null,
   question: null,
-  note: null
+  note: null,
+  attestation: null
 });
 
 const previous: PreviousRun = {

@@ -26,7 +26,14 @@ const status = (
   s: RuleStatus["status"],
   blocking = s === "FAIL",
   complete = true
-): RuleStatus => ({ rule: ruleId, status: s, blocking, complete, detail: "" });
+): RuleStatus => ({
+  rule: ruleId,
+  status: s,
+  blocking,
+  complete,
+  attested: false,
+  detail: ""
+});
 
 const settle = (
   verdict: CrossFileVerdict["verdict"],
@@ -55,6 +62,7 @@ describe("ruleStatuses", () => {
       status: "FAIL",
       blocking: true,
       complete: true,
+      attested: false,
       detail: "fails in b.ts:3"
     });
   });
@@ -74,6 +82,7 @@ describe("ruleStatuses", () => {
       status: "FAIL",
       blocking: false,
       complete: true,
+      attested: false,
       detail: "fails in b.ts:3 on a line this pull request does not change"
     });
     expect(ruleStatuses(rules, files, [], [], true)[0].blocking).toBe(true);
@@ -220,6 +229,7 @@ describe("ruleStatuses", () => {
         status: "FAIL",
         blocking: true,
         complete: true,
+        attested: false,
         detail: "fails across files: settled"
       });
       const failed = [file("src/a.ts", [verdict(2, "FAIL", { line: 1 })])];

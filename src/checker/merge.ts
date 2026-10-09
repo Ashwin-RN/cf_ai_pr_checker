@@ -2,6 +2,7 @@ import { limits } from "./limits";
 import { ruleApplies } from "./rules";
 import { MORE_FILES } from "./select";
 import type {
+  Attestation,
   CheckStatus,
   CrossFileVerdict,
   FileCheck,
@@ -133,7 +134,14 @@ export function ruleStatuses(
       s: Verdict,
       blocking: boolean,
       detail: string
-    ): RuleStatus => ({ rule: rule.id, status: s, blocking, complete, detail });
+    ): RuleStatus => ({
+      rule: rule.id,
+      status: s,
+      blocking,
+      complete,
+      attested: false,
+      detail
+    });
     const hits = checked.flatMap((f) =>
       f.verdicts
         .filter((v) => v.rule === rule.id)
@@ -320,7 +328,8 @@ function fileDraft(
     steps: v.steps,
     resolution: v.resolution,
     question: null,
-    note: v.note
+    note: v.note,
+    attestation: null
   };
   if (blocks) return draft;
   if (v.verdict === "FAIL" && v.verified) {
@@ -389,7 +398,8 @@ export function buildFindings(
         steps: w.steps,
         resolution: null,
         question: null,
-        note: null
+        note: null,
+        attestation: null
       });
     }
   }
@@ -414,7 +424,8 @@ export function buildFindings(
       note:
         [c.note, facts ? `across files, from: ${facts}` : null]
           .filter(Boolean)
-          .join("; ") || null
+          .join("; ") || null,
+      attestation: null
     };
     (blocks ? blocking : questions).push(draft);
   }
@@ -434,7 +445,8 @@ export function buildFindings(
       ],
       resolution: null,
       question: null,
-      note: null
+      note: null,
+      attestation: null
     });
   }
   for (const claim of intent?.unsupported ?? []) {
@@ -453,7 +465,8 @@ export function buildFindings(
       ],
       resolution: null,
       question: null,
-      note: null
+      note: null,
+      attestation: null
     });
   }
   blocking.sort(byRuleThenPath);
@@ -464,4 +477,62 @@ export function buildFindings(
     ...number(questions, "Q"),
     ...number(warnings, "W", limits.warningsPerReport)
   ];
+}
+
+function preview(text: string): string {
+  const max = limits.answerPreviewChars;
+  const one = text.replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
+
+// An answered question is the author's word that the rule is met where the
+// check could not see. It settles that question: a rule that is UNSURE only
+// because of answered questions passes by attestation, and says so. An
+// answer never touches a FAIL, never fills a coverage gap, and counts for
+// nothing under strict. Rule ids are positions in the rules file, so an
+// answer given against another rule set is stale and does not count.
+export function applyAttestations(
+  statuses: RuleStatus[],
+  findings: Finding[],
+  attestations: Attestation[],
+  rulesHash: string,
+  strict: boolean
+): { statuses: RuleStatus[]; findings: Finding[] } {
+  const byKey = new Map(attestations.map((a) => [a.key, a]));
+  const answered = findings.map((f): Finding => {
+    const a = f.kind === "question" ? byKey.get(f.key) : undefined;
+    if (!a) return { ...f, attestation: null };
+    const stale = a.rulesHash !== rulesHash;
+    const note = strict
+      ? "not counted: the check is strict"
+      : stale
+        ? "not counted: the rules changed since the answer"
+        : null;
+    return {
+      ...f,
+      attestation: {
+        answer: a.answer,
+        headSha: a.headSha,
+        at: a.createdAt,
+        counted: note === null,
+        note
+      }
+    };
+  });
+  const out = statuses.map((s): RuleStatus => {
+    if (s.status !== "UNSURE" || !s.complete) return s;
+    const questions = answered.filter(
+      (f) => f.kind === "question" && f.rule === s.rule
+    );
+    if (!questions.length || !questions.every((q) => q.attestation?.counted)) {
+      return s;
+    }
+    const answers = questions.map((q) => q.attestation?.answer ?? "");
+    const detail =
+      answers.length === 1
+        ? `passes by attestation: "${preview(answers[0])}"`
+        : `passes by attestation on ${answers.length} answers`;
+    return { ...s, status: "PASS", attested: true, detail };
+  });
+  return { statuses: out, findings: answered };
 }

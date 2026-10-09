@@ -18,7 +18,8 @@ const finding: Finding = {
   steps: ["Remove the call.", "Run the tests."],
   resolution: "No console.log in src/a.ts.",
   question: null,
-  note: null
+  note: null,
+  attestation: null
 };
 
 describe("renderReport", () => {
@@ -52,6 +53,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: true,
             complete: true,
+            attested: false,
             detail: "fails in src/a.ts:3"
           },
           {
@@ -59,6 +61,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: "passes in 1 file"
           }
         ],
@@ -113,6 +116,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: false,
             complete: true,
+            attested: false,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -121,6 +125,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: "passes in 1 file"
           }
         ]
@@ -149,6 +154,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: true,
             complete: true,
+            attested: false,
             detail: ""
           },
           {
@@ -156,6 +162,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: ""
           }
         ],
@@ -225,6 +232,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: false,
             complete: false,
+            attested: false,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -233,6 +241,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: ""
           }
         ],
@@ -257,7 +266,14 @@ describe("renderReport", () => {
     const r = result({
       rules: [rule(1, "a | b")],
       ruleStatuses: [
-        { rule: 1, status: "NA", blocking: false, complete: true, detail: "" }
+        {
+          rule: 1,
+          status: "NA",
+          blocking: false,
+          complete: true,
+          attested: false,
+          detail: ""
+        }
       ]
     });
     expect(renderReport(r, { json: false })).toContain("| 1 | a \\| b | NA |");

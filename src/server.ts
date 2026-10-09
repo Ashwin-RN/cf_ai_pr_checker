@@ -14,6 +14,7 @@ import {
   parsePrUrl
 } from "./checker/github";
 import { limits } from "./checker/limits";
+import { applyAttestations, overallStatus } from "./checker/merge";
 import { jsonCaller, modelFor, workersAiText } from "./checker/model";
 import { machineReport, renderReport } from "./checker/report";
 import {
@@ -24,13 +25,18 @@ import {
   parseRulesFile
 } from "./checker/rules";
 import type {
+  Attestation,
   CheckResult,
+  CheckStatus,
   FileCheck,
+  Finding,
   Pr,
   Progress,
   Rule,
-  RuleSet
+  RuleSet,
+  RuleStatus
 } from "./checker/types";
+import { CheckMcp, type McpProps } from "./mcp";
 import { Store, type Sql } from "./store";
 import type { CheckParams, RulesLookup } from "./workflow";
 import { streamChatResponse, toChatMessages } from "./workers-ai";
@@ -42,6 +48,7 @@ import {
 } from "./workspace";
 
 export { CheckWorkflow } from "./workflow";
+export { CheckMcp };
 
 // The generated `Env` carries the bindings. Secrets and variables are
 // optional because a deployment may leave them unset.
@@ -61,7 +68,7 @@ const CHAT_HISTORY = 12;
 const CHAT_MESSAGE_CHARS = 4_000;
 
 const SYSTEM_PROMPT = `You are the chat side of a pull request checker that runs on Cloudflare.
-How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks.
+How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks. "answer Q2: <how the rule is met>" answers a question from the last report; the next check of that pull request then passes the rule by attestation unless strict.
 Answer questions about that briefly. You cannot run a check yourself and must never claim to have checked anything.`;
 
 function json(data: unknown, status = 200): Response {
@@ -146,6 +153,31 @@ type CheckOptions = {
   onProgress?: (progress: Progress) => void;
 };
 
+// Outcomes as data: these cross RPC and HTTP, and an error keeps neither
+// its class nor its kind across either.
+export type CheckLookup =
+  | { ok: true; result: CheckResult }
+  | { ok: false; kind: CheckError["kind"] | "error"; message: string };
+
+export type CheckState =
+  | { status: "running"; progress: Progress | null }
+  | { status: "error"; error: string }
+  | { status: "done"; result: CheckResult };
+
+export type AnswerOutcome =
+  | {
+      ok: true;
+      checkId: string;
+      prUrl: string;
+      finding: Finding;
+      attestation: Attestation;
+      // What the same evidence gives with every answer so far applied.
+      preview: { status: CheckStatus; rules: RuleStatus[] };
+    }
+  | { ok: false; message: string };
+
+const ANSWER = /^\s*answer\s+(\S+?)(?:\s+on\s+(\S+))?\s*:\s*([\s\S]+)$/i;
+
 // A check this instance is waiting on: where its progress goes and how its
 // end is delivered.
 type Waiter = {
@@ -165,6 +197,8 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   // Checks whose end reached a waiter, so the Workflow's completion callback
   // does not deliver the report a second time.
   private delivered = new Set<string>();
+  // The latest progress of each check running through this instance.
+  private progress = new Map<string, Progress>();
 
   async onStart() {
     this.store.init();
@@ -177,6 +211,10 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     if (prUrl) return this.checkResponse(prUrl);
     if (/^\s*rules:/i.test(text)) return this.rulesResponse(text);
     if (/^\s*history\s*$/i.test(text)) return reply(this.historyMarkdown());
+    const answer = ANSWER.exec(text);
+    if (answer) {
+      return reply(this.answerMarkdown(answer[1], answer[2], answer[3]));
+    }
 
     const current = this.store.currentRules();
     const context = current
@@ -214,35 +252,59 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
       if (!body || typeof body.prUrl !== "string") {
         return json({ error: "Body must be JSON with a prUrl string." }, 400);
       }
-      let rules: RuleSet | null = null;
+      let rules: string[] | undefined;
       if (body.rules !== undefined) {
-        const texts = Array.isArray(body.rules)
+        rules = Array.isArray(body.rules)
           ? body.rules.filter((x): x is string => typeof x === "string")
           : typeof body.rules === "string"
             ? parseRuleText(body.rules)
             : [];
-        if (!texts.length) {
+        if (!rules.length) {
           return json(
             { error: "rules must be a string or an array of strings." },
             400
           );
         }
-        rules = (await this.saveRules(texts, "the rules sent with the request"))
-          .set;
       }
-      try {
-        const result = await this.check(crypto.randomUUID(), body.prUrl, {
-          rules,
-          strict: body.strict === true,
-          source: "api"
-        });
-        return json(apiBody(result));
-      } catch (e) {
-        if (!(e instanceof CheckError)) throw e;
-        const status =
-          e.kind === "bad_url" || e.kind === "no_rules" ? 400 : 502;
-        return json({ error: e.message, kind: e.kind }, status);
+      const out = await this.apiCheck(crypto.randomUUID(), body.prUrl, {
+        rules,
+        strict: body.strict === true
+      });
+      if (out.ok) return json(apiBody(out.result));
+      const status =
+        out.kind === "bad_url" || out.kind === "no_rules" ? 400 : 502;
+      return json({ error: out.message, kind: out.kind }, status);
+    }
+    if (request.method === "POST" && url.pathname === "/api/answer") {
+      const body = (await request.json().catch(() => null)) as {
+        checkId?: unknown;
+        question?: unknown;
+        answer?: unknown;
+      } | null;
+      if (
+        !body ||
+        typeof body.checkId !== "string" ||
+        typeof body.question !== "string" ||
+        typeof body.answer !== "string"
+      ) {
+        return json(
+          {
+            error:
+              "Body must be JSON with checkId, question and answer strings."
+          },
+          400
+        );
       }
+      const out = this.answer(body.checkId, body.question, body.answer);
+      return out.ok
+        ? json({
+            check_id: out.checkId,
+            pr_url: out.prUrl,
+            finding: out.finding,
+            attestation: out.attestation,
+            preview: out.preview
+          })
+        : json({ error: out.message }, 400);
     }
     const match = /^\/api\/checks\/([\w-]+)$/.exec(url.pathname);
     if (request.method === "GET" && match) {
@@ -260,13 +322,148 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   }
 
   @callable()
-  listChecks() {
-    return this.store.listChecks();
+  listChecks(limit = 20) {
+    return this.store.listChecks(limit);
   }
 
   @callable()
   getCheck(id: string) {
     return this.store.getCheck(id);
+  }
+
+  // The methods below are called over RPC by the MCP server as well as from
+  // the HTTP API and the chat, so each returns its failure as data.
+
+  // A check with the caller's id, so the caller can follow its progress.
+  // Rules given here are used for this check and saved for the workspace.
+  async apiCheck(
+    id: string,
+    prUrl: string,
+    options: { rules?: string[]; strict?: boolean }
+  ): Promise<CheckLookup> {
+    let rules: RuleSet | null = null;
+    if (options.rules?.length) {
+      rules = (
+        await this.saveRules(options.rules, "the rules sent with the request")
+      ).set;
+    }
+    try {
+      const result = await this.check(id, prUrl, {
+        rules,
+        strict: options.strict === true,
+        source: "api"
+      });
+      return { ok: true, result };
+    } catch (e) {
+      return e instanceof CheckError
+        ? { ok: false, kind: e.kind, message: e.message }
+        : {
+            ok: false,
+            kind: "error",
+            message: `The check failed: ${(e as Error).message}`
+          };
+    }
+  }
+
+  progressOf(id: string): Progress | null {
+    return this.progress.get(id) ?? null;
+  }
+
+  // Where a check stands, for a caller that lost its stream. A prefix of
+  // the id is enough when it names one check.
+  stateOf(idOrPrefix: string): CheckState | null {
+    const id = this.store.findCheckId(idOrPrefix);
+    const state = id ? this.store.checkState(id) : null;
+    if (!id || !state) return null;
+    if (state.result) return { status: "done", result: state.result };
+    if (state.status === "error") {
+      return { status: "error", error: state.error ?? "The check failed." };
+    }
+    return { status: "running", progress: this.progress.get(id) ?? null };
+  }
+
+  async setRules(
+    texts: string[],
+    source: string
+  ): Promise<{ set: RuleSet; interpreted: boolean }> {
+    return this.saveRules(texts, source);
+  }
+
+  // Records the author's answer to a question on a finished check: a claim
+  // that the rule is met where the check could not see. It settles that
+  // question on the next check of the pull request. Only a question can be
+  // answered; a blocking item needs a change to the code.
+  answer(
+    checkIdOrPrefix: string,
+    question: string,
+    text: string
+  ): AnswerOutcome {
+    const id = this.store.findCheckId(checkIdOrPrefix);
+    const result = id ? this.store.getCheck(id) : null;
+    if (!result) {
+      return {
+        ok: false,
+        message: `No finished check matches ${checkIdOrPrefix}.`
+      };
+    }
+    const wanted = question.trim();
+    const finding = result.findings.find(
+      (f) => f.id.toUpperCase() === wanted.toUpperCase() || f.key === wanted
+    );
+    if (!finding) {
+      const open = result.findings
+        .filter((f) => f.kind === "question")
+        .map((f) => f.id);
+      return {
+        ok: false,
+        message: open.length
+          ? `Check ${result.id} has no item ${wanted}. Its questions are ${open.join(", ")}.`
+          : `Check ${result.id} has no item ${wanted}, and no questions to answer.`
+      };
+    }
+    if (finding.kind !== "question") {
+      return {
+        ok: false,
+        message: `${finding.id} is ${finding.kind === "blocking" ? "a blocking item" : "a warning"}, not a question. Only questions can be answered; a blocking item needs a change to the code.`
+      };
+    }
+    const answer = text
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, limits.answerChars);
+    if (!answer) return { ok: false, message: "The answer is empty." };
+    const attestation: Attestation = {
+      key: finding.key,
+      rule: finding.rule,
+      path: finding.path,
+      question: finding.question ?? finding.summary,
+      answer,
+      checkId: result.id,
+      headSha: result.pr.headSha,
+      rulesHash: result.rulesHash,
+      createdAt: Date.now()
+    };
+    this.store.putAttestation(result.pr.url, attestation);
+    // The stored run with every answer so far applied: what the same
+    // evidence would give now, without a model call.
+    const applied = applyAttestations(
+      result.ruleStatuses,
+      result.findings,
+      this.store.attestationsFor(result.pr.url),
+      result.rulesHash,
+      result.strict
+    );
+    return {
+      ok: true,
+      checkId: result.id,
+      prUrl: result.pr.url,
+      finding: applied.findings.find((f) => f.key === finding.key) ?? finding,
+      attestation,
+      preview: {
+        status: overallStatus(applied.statuses),
+        rules: applied.statuses
+      }
+    };
   }
 
   // Called by the Workflow over RPC: the rules for a pull request, with a
@@ -463,6 +660,20 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     return reply(rulesMarkdown(set.rules, set.hash, interpreted));
   }
 
+  // "answer Q2: ..." answers on the latest finished check; "answer Q2 on
+  // <check id>: ..." names one.
+  private answerMarkdown(
+    question: string,
+    checkId: string | undefined,
+    text: string
+  ): string {
+    const id = checkId ?? this.store.latestCheckId();
+    if (!id) return "No finished check to answer on yet.";
+    const out = this.answer(id, question, text);
+    if (!out.ok) return out.message;
+    return `Recorded your answer to ${out.finding.id} (rule ${out.attestation.rule}, ${out.attestation.path}) on check \`${out.checkId.slice(0, 8)}\`. The next check of ${out.prUrl} takes it: with the answers so far, the same evidence gives ${out.preview.status.toUpperCase()}. An answer counts as a pass by attestation, never under strict.`;
+  }
+
   private historyMarkdown(): string {
     const rows = this.store.listChecks();
     if (!rows.length) return "No checks yet.";
@@ -536,12 +747,21 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
       prUrl: canonical,
       rules: options.rules ?? null,
       strict: options.strict ?? false,
-      previous: this.store.previousCheck(canonical)
+      previous: this.store.previousCheck(canonical),
+      attestations: this.store.attestationsFor(canonical)
     };
     this.store.startCheck(id, canonical);
-    return this.usesWorkflow()
-      ? this.checkByWorkflow(input, options)
-      : this.checkInline(input, options);
+    const onProgress = (progress: Progress) => {
+      this.progress.set(id, progress);
+      options.onProgress?.(progress);
+    };
+    try {
+      return await (this.usesWorkflow()
+        ? this.checkByWorkflow(input, { ...options, onProgress })
+        : this.checkInline(input, { ...options, onProgress }));
+    } finally {
+      this.progress.delete(id);
+    }
   }
 
   private async checkInline(
@@ -636,9 +856,8 @@ function sameToken(given: string, expected: string): boolean {
   return diff === 0;
 }
 
-// Bearer token, then hand the request to the workspace's Durable Object.
-// API workspaces live in their own name space, apart from the chat's.
-async function handleApi(request: Request, env: AppEnv): Promise<Response> {
+// The one bearer token that guards the HTTP API and the MCP server.
+function unauthorized(request: Request, env: AppEnv): Response | null {
   if (!env.API_TOKEN) {
     return json(
       { error: "The API is off until the API_TOKEN secret is set." },
@@ -649,6 +868,14 @@ async function handleApi(request: Request, env: AppEnv): Promise<Response> {
   if (!auth.startsWith("Bearer ") || !sameToken(auth.slice(7), env.API_TOKEN)) {
     return json({ error: "Unauthorized." }, 401);
   }
+  return null;
+}
+
+// Bearer token, then hand the request to the workspace's Durable Object.
+// API workspaces live in their own name space, apart from the chat's.
+async function handleApi(request: Request, env: AppEnv): Promise<Response> {
+  const denied = unauthorized(request, env);
+  if (denied) return denied;
   const url = new URL(request.url);
   let workspace = url.searchParams.get("workspace") ?? "api";
   let body: string | undefined;
@@ -677,22 +904,57 @@ async function handleApi(request: Request, env: AppEnv): Promise<Response> {
   );
 }
 
-// The chat transport opens chat workspaces only, so an API workspace cannot
-// be reached by naming it.
+// The MCP server, behind the same token. The workspace is named in the URL
+// and bound to the session: /mcp?workspace=ci, default api. The session's
+// Durable Object reads it from its props.
+function handleMcp(
+  request: Request,
+  env: AppEnv,
+  ctx: ExecutionContext
+): Promise<Response> {
+  if (request.method !== "OPTIONS") {
+    const denied = unauthorized(request, env);
+    if (denied) return Promise.resolve(denied);
+  }
+  const workspace = new URL(request.url).searchParams.get("workspace") ?? "api";
+  if (!isApiWorkspace(workspace)) {
+    return Promise.resolve(
+      json(
+        { error: "workspace must be lowercase letters, digits and dashes." },
+        400
+      )
+    );
+  }
+  const props: McpProps = { workspace };
+  const session = {
+    waitUntil: (p: Promise<unknown>) => ctx.waitUntil(p),
+    passThroughOnException: () => ctx.passThroughOnException(),
+    props
+  } as unknown as ExecutionContext;
+  return CheckMcp.serve("/mcp", { binding: "CheckMcp" }).fetch(
+    request,
+    env,
+    session
+  );
+}
+
+// The chat transport opens chat workspaces only, and only on the chat
+// agent: an API workspace cannot be reached by naming it, and the MCP
+// sessions are not reachable this way at all.
 function chatOnly(
   _request: Request,
-  lobby: { name: string }
+  lobby: { className: string; name: string }
 ): Response | undefined {
-  return isChatWorkspace(lobby.name)
+  return lobby.className === "ChatAgent" && isChatWorkspace(lobby.name)
     ? undefined
     : new Response("Not found", { status: 404 });
 }
 
 export default {
-  async fetch(request: Request, env: AppEnv) {
-    if (new URL(request.url).pathname.startsWith("/api/")) {
-      return handleApi(request, env);
-    }
+  async fetch(request: Request, env: AppEnv, ctx: ExecutionContext) {
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/api/")) return handleApi(request, env);
+    if (pathname === "/mcp") return handleMcp(request, env, ctx);
     return (
       (await routeAgentRequest(request, env, {
         onBeforeConnect: chatOnly,

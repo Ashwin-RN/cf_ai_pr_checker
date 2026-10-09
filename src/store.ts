@@ -1,4 +1,5 @@
 import type {
+  Attestation,
   CheckResult,
   FileCheck,
   PreviousRun,
@@ -42,6 +43,10 @@ export class Store {
     this.sql`CREATE TABLE IF NOT EXISTS file_results (
       check_id TEXT NOT NULL, path TEXT NOT NULL, state TEXT NOT NULL, result_json TEXT NOT NULL,
       raw_model_output TEXT, PRIMARY KEY (check_id, path))`;
+    this.sql`CREATE TABLE IF NOT EXISTS attestations (
+      pr_url TEXT NOT NULL, key TEXT NOT NULL, rule INTEGER, path TEXT NOT NULL,
+      question TEXT NOT NULL, answer TEXT NOT NULL, check_id TEXT NOT NULL, head_sha TEXT NOT NULL,
+      rules_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (pr_url, key))`;
   }
 
   // A normalised rule set, keyed by the hash of its text. Saving the same
@@ -142,6 +147,24 @@ export class Store {
       : null;
   }
 
+  // The id a caller gave, or the one check it is a prefix of. The chat shows
+  // eight characters of an id, which is enough to name it.
+  findCheckId(idOrPrefix: string): string | null {
+    const given = idOrPrefix.trim();
+    if (!/^[\w-]{4,}$/.test(given)) return null;
+    const rows = this.sql<{ id: string }>`
+      SELECT id FROM checks WHERE id = ${given} OR id LIKE ${`${given}%`} LIMIT 2`;
+    if (rows.some((r) => r.id === given)) return given;
+    return rows.length === 1 ? rows[0].id : null;
+  }
+
+  // The most recent check that has a result.
+  latestCheckId(): string | null {
+    const row = this.sql<{ id: string }>`
+      SELECT id FROM checks WHERE result_json IS NOT NULL ORDER BY started_at DESC LIMIT 1`[0];
+    return row?.id ?? null;
+  }
+
   // The last finished check of the same pull request, for the run-to-run diff.
   previousCheck(prUrl: string): PreviousRun | null {
     const row = this.sql<{ result_json: string | null }>`
@@ -162,6 +185,41 @@ export class Store {
         summary: f.summary
       }))
     };
+  }
+
+  // An answer to a question, kept per pull request and finding key. A new
+  // answer to the same question replaces the old one.
+  putAttestation(prUrl: string, a: Attestation): void {
+    this
+      .sql`INSERT OR REPLACE INTO attestations (pr_url, key, rule, path, question, answer, check_id, head_sha, rules_hash, created_at)
+      VALUES (${prUrl}, ${a.key}, ${a.rule}, ${a.path}, ${a.question}, ${a.answer}, ${a.checkId}, ${a.headSha}, ${a.rulesHash}, ${a.createdAt})`;
+  }
+
+  attestationsFor(prUrl: string): Attestation[] {
+    return this.sql<{
+      key: string;
+      rule: number | null;
+      path: string;
+      question: string;
+      answer: string;
+      check_id: string;
+      head_sha: string;
+      rules_hash: string;
+      created_at: number;
+    }>`SELECT key, rule, path, question, answer, check_id, head_sha, rules_hash, created_at
+      FROM attestations WHERE pr_url = ${prUrl} ORDER BY created_at`.map(
+      (r) => ({
+        key: r.key,
+        rule: r.rule,
+        path: r.path,
+        question: r.question,
+        answer: r.answer,
+        checkId: r.check_id,
+        headSha: r.head_sha,
+        rulesHash: r.rules_hash,
+        createdAt: r.created_at
+      })
+    );
   }
 
   listChecks(limit = 20): CheckRow[] {

@@ -83,6 +83,7 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
       status: "PASS",
       blocking: false,
       complete: true,
+      attested: false,
       detail: "passes in 1 file"
     })),
     findings: [],

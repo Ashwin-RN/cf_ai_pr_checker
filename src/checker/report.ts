@@ -1,6 +1,6 @@
 import type { CheckResult, Finding, RuleStatus } from "./types";
 
-const PROTOCOL = `How to use this report: work through Blocking, then Questions, then Warnings. Each item gives steps to run against your own code and the condition the next check verifies. After pushing, run the same check again: keys stay the same across runs, and each item says whether it is new or still open. A blocking item marked pre-existing sits on a line this pull request does not change; it is reported but does not fail the check unless strict.`;
+const PROTOCOL = `How to use this report: work through Blocking, then Questions, then Warnings. Each item gives steps to run against your own code and the condition the next check verifies. After pushing, run the same check again: keys stay the same across runs, and each item says whether it is new or still open. A blocking item marked pre-existing sits on a line this pull request does not change; it is reported but does not fail the check unless strict. A question can be answered when the rule is met in a way the check cannot see; an item marked answered is settled by that answer and counts as a pass unless strict.`;
 
 function where(f: Finding): string {
   return f.line === null ? f.path : `${f.path}:${f.line}`;
@@ -10,7 +10,8 @@ function heading(f: Finding): string {
   const rule = f.rule === null ? "" : ` · rule ${f.rule}`;
   const tags = [
     f.origin === "pre-existing" ? "pre-existing" : null,
-    f.change === "new" ? "new" : f.change === "open" ? "still open" : null
+    f.change === "new" ? "new" : f.change === "open" ? "still open" : null,
+    f.attestation ? "answered" : null
   ]
     .filter(Boolean)
     .map((t) => ` · ${t}`)
@@ -22,6 +23,16 @@ function item(f: Finding): string {
   const out = [heading(f), ""];
   if (f.quote) out.push(`> \`${f.quote.trim()}\``, "");
   if (f.question) out.push(`**Question:** ${f.question}`, "");
+  const a = f.attestation;
+  if (a) {
+    const stands = a.counted
+      ? "counts as a pass by attestation"
+      : (a.note ?? "not counted");
+    out.push(
+      `**Answer:** ${a.answer} (given at \`${a.headSha.slice(0, 7)}\`; ${stands})`,
+      ""
+    );
+  }
   out.push(`**${f.kind === "warning" ? "Note" : "Reason"}:** ${f.summary}`, "");
   if (f.origin === "pre-existing") {
     out.push(
@@ -30,6 +41,8 @@ function item(f: Finding): string {
     );
   }
   if (f.note) out.push(`**Caveat:** ${f.note}`, "");
+  // An answer that counts settles the item; its steps are for the unsettled.
+  if (a?.counted) return out.join("\n");
   if (f.why) out.push(`**Why:** ${f.why}`, "");
   if (f.steps.length) {
     out.push("**Steps:**", "");
@@ -40,8 +53,14 @@ function item(f: Finding): string {
   return out.join("\n");
 }
 
+// Open items first; answered ones follow, so the reader meets what still
+// needs work before what is settled.
 function section(title: string, items: Finding[]): string {
-  const body = items.length ? items.map(item).join("\n") : "none\n";
+  const ordered = [
+    ...items.filter((f) => !f.attestation?.counted),
+    ...items.filter((f) => f.attestation?.counted)
+  ];
+  const body = ordered.length ? ordered.map(item).join("\n") : "none\n";
   return `## ${title}\n\n${body}`;
 }
 
@@ -56,6 +75,7 @@ function statusLine(r: CheckResult): string {
   const unsure = r.ruleStatuses.filter(
     (s) => s.status === "UNSURE" || !s.complete
   ).length;
+  const attested = r.ruleStatuses.filter((s) => s.attested).length;
   const total = r.rules.length;
   const onAdded = r.strict ? "" : " on lines this pull request adds";
   const notes: string[] = [];
@@ -69,6 +89,11 @@ function statusLine(r: CheckResult): string {
       `${unsure} need${unsure === 1 ? "s" : ""} an answer or more coverage.`
     );
   }
+  if (attested) {
+    notes.push(
+      `${attested} pass${attested === 1 ? "es" : ""} by attestation (see Questions).`
+    );
+  }
   const rest = notes.length ? ` ${notes.join(" ")}` : "";
   if (r.status === "fail") {
     return `**FAIL.** ${blocking} of ${total} rules fail${onAdded}.${rest}`;
@@ -78,7 +103,7 @@ function statusLine(r: CheckResult): string {
   }
   return preExisting
     ? `**PASS.** No rule fails${onAdded}.${rest}`
-    : `**PASS.** All ${total} rules pass on every checked file.`;
+    : `**PASS.** All ${total} rules pass on every checked file.${rest}`;
 }
 
 function previousLine(r: CheckResult): string | null {
@@ -95,6 +120,7 @@ function previousLine(r: CheckResult): string | null {
 }
 
 function statusCell(s: RuleStatus): string {
+  if (s.attested) return "PASS (attested)";
   return s.status === "FAIL" && !s.blocking ? "FAIL (pre-existing)" : s.status;
 }
 
@@ -161,6 +187,7 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
         status: s.status,
         blocking: s.blocking,
         complete: s.complete,
+        attested: s.attested,
         detail: s.detail
       };
     }),
@@ -182,6 +209,31 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
         method: "POST",
         path: "/api/check",
         body: { prUrl: r.pr.url, workspace: r.workspace, strict: r.strict }
+      },
+      mcp: {
+        tool: "check_pr",
+        arguments: { pr_url: r.pr.url, strict: r.strict }
+      }
+    },
+    // How to answer a question: by the item's id from this run, or its key.
+    answer: {
+      api: {
+        method: "POST",
+        path: "/api/answer",
+        body: {
+          checkId: r.id,
+          workspace: r.workspace,
+          question: "<id or key>",
+          answer: "<how the rule is met>"
+        }
+      },
+      mcp: {
+        tool: "answer_question",
+        arguments: {
+          check_id: r.id,
+          question: "<id or key>",
+          answer: "<how the rule is met>"
+        }
       }
     }
   };

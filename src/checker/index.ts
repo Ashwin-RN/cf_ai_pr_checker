@@ -3,6 +3,7 @@ import { GithubError, fetchPr, fetchRawFile, parsePrUrl } from "./github";
 import { checkIntent } from "./intent";
 import { limits } from "./limits";
 import {
+  applyAttestations,
   buildFindings,
   gateCrossFile,
   overallStatus,
@@ -20,6 +21,7 @@ import { ruleApplies } from "./rules";
 import { MORE_FILES, selectFiles } from "./select";
 import { collectFacts, factsCut, settleCrossFile } from "./settle";
 import type {
+  Attestation,
   CheckResult,
   CrossFileVerdict,
   FileCheck,
@@ -56,6 +58,8 @@ export type CheckInput = {
   strict?: boolean;
   runner?: Runner;
   previous?: PreviousRun | null;
+  // Questions answered on earlier checks of the same pull request.
+  attestations?: Attestation[] | null;
 };
 
 export type CheckDeps = {
@@ -477,16 +481,18 @@ export function assemble(a: Assembly): CheckResult {
     notChecked,
     factsCut(pr, results)
   );
-  const statuses = ruleStatuses(
-    ruleSet.rules,
-    results,
-    notChecked,
-    gated,
+  // Answers settle questions after the merge and before the diff, so an
+  // answered finding keeps its key and the diff sees it as the same item.
+  const { statuses, findings } = applyAttestations(
+    ruleStatuses(ruleSet.rules, results, notChecked, gated, strict),
+    buildFindings(ruleSet.rules, results, gated, intent),
+    input.attestations ?? [],
+    ruleSet.hash,
     strict
   );
   const diffed = diffRun(
     input.previous ?? null,
-    buildFindings(ruleSet.rules, results, gated, intent),
+    findings,
     ruleSet.hash,
     assessedBy(ruleSet.rules, results, gated, intent)
   );
