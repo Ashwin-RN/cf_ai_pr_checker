@@ -27,6 +27,17 @@ export const limits = {
   intentItems: 3,
   fileBytesMax: 1_000_000,
   fileListPagesMax: 3,
+  // A Workflow step's output is capped at 1 MiB. The file list travels
+  // without its diffs and the selected diffs are trimmed to fit under this.
+  stepOutputChars: 800_000,
+  // Retries for a Workflow step that fails outright. A model error is a
+  // result, not a retry.
+  stepRetries: { limit: 2, delay: "5 seconds", backoff: "exponential" },
+  stepTimeout: "10 minutes",
+  // How long the agent waits for a check, and how often it looks at the
+  // stored row while waiting.
+  checkWaitMs: 15 * 60_000,
+  checkPollMs: 2_000,
   skipPaths: [
     /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock)$/,
     /\.min\.(js|css)$/,

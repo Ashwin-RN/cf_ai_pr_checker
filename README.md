@@ -9,7 +9,7 @@ The reader can be a person or the coding agent that opened the pull request. It 
 
 Live: https://cf-ai-pr-checker.ashwin-rn.workers.dev
 
-**Status:** whole-file checks, rules that span files, an intent check, a run-to-run diff, rules from the repository, a CI job that comments on pull requests, and an evaluation set. A Cloudflare Workflow for the per-file steps and an MCP server come next.
+**Status:** whole-file checks, rules that span files, an intent check, a run-to-run diff, rules from the repository, a CI job that comments on pull requests, an evaluation set, and each check running as a Cloudflare Workflow with one durable step per file. An MCP server comes next.
 
 ## The loop
 
@@ -32,14 +32,16 @@ A full sample report from a run with a fresh Workers AI budget is still to be ad
 
 ## How it meets the assignment
 
-| Required component      | How this app does it                                                                                                                                                                                                                                                                                    | Where in the code                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| LLM                     | Llama 3.3 on Workers AI, JSON Mode at temperature 0. One call to interpret the rules, one per changed file (or per part of a big file), one second look at each FAIL, one to settle rules across files, one to compare the description with the change                                                  | `src/checker/model.ts`, `src/checker/prompts.ts`                 |
-| Workflow / coordination | One Durable Object per workspace runs the sequence: fetch the pull request, resolve the rules, select files, load and check them in parallel, verify quotes, settle across files, compare intent, merge, diff against the last run, render. Step 3 moves the per-file checks into a Cloudflare Workflow | `src/checker/index.ts`, `src/server.ts`                          |
-| User input via chat     | Chat UI served by the Worker, with a progress card per check. The same engine sits behind `POST /api/check`, which the CI job calls                                                                                                                                                                     | `src/app.tsx`, `src/server.ts`, `.github/workflows/pr-check.yml` |
-| Memory or state         | Rules, checks and per-file results in the Durable Object's SQLite storage. The last check of the same pull request is what the run-to-run diff reads                                                                                                                                                    | `src/store.ts`                                                   |
+| Required component      | How this app does it                                                                                                                                                                                                                                                                                                                                                                                | Where in the code                                                |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| LLM                     | Llama 3.3 on Workers AI, JSON Mode at temperature 0. One call to interpret the rules, one per changed file (or per part of a big file), one second look at each FAIL, one to settle rules across files, one to compare the description with the change                                                                                                                                              | `src/checker/model.ts`, `src/checker/prompts.ts`                 |
+| Workflow / coordination | A Cloudflare Workflow runs each check as durable steps: fetch the pull request, resolve the rules through the agent, one step per file a few at a time, settle across files, finalise. Each step hands its result to the workspace's Durable Object by RPC, so a retry cannot write twice and a crash keeps the files already done. The same stages run in one process behind `CHECK_RUNNER=inline` | `src/workflow.ts`, `src/checker/index.ts`, `src/server.ts`       |
+| User input via chat     | Chat UI served by the Worker, with a progress card per check. The same engine sits behind `POST /api/check`, which the CI job calls                                                                                                                                                                                                                                                                 | `src/app.tsx`, `src/server.ts`, `.github/workflows/pr-check.yml` |
+| Memory or state         | Rules, checks and per-file results in the Durable Object's SQLite storage. The last check of the same pull request is what the run-to-run diff reads                                                                                                                                                                                                                                                | `src/store.ts`                                                   |
 
 ## How a check runs
+
+A check is a Cloudflare Workflow. Fetching is one step and resolving the rules another; each file is a step of its own, five at a time, covering check and verify; settling and intent share a step; merge, render and diff share the last. A step that fails outright is retried; a model error is a result, not a retry. Every step hands what it found to the workspace's Durable Object by RPC before it returns, so a retried step cannot write twice and a Workflow that dies keeps the files already done. Step outputs carry results only, never file content. The agent starts the Workflow, forwards its progress to the chat or the API caller, and takes the result when the last step stores it. With the variable `CHECK_RUNNER=inline` the same stages run inside the Durable Object instead, and the JSON block names which runner a check used.
 
 1. **Rules.** From `pr-rules.md` at the root of the pull request's base branch when the repository has one; when the pull request itself adds that file, from its head commit; otherwise the rules saved in the workspace with a message starting with `rules:`. Rules sent with an API request come first. One model call reads each rule as "must" or "must not", one file or many, and a directory scope. The scope is kept only when the rule itself names that directory, so a bad guess cannot hide files from a rule. The interpretation is cached by the hash of the rule text.
 2. **Fetch.** The pull request and its changed files come from the GitHub API, and each file's full content at the head commit from raw.githubusercontent.com. Lockfiles, minified, vendored, binary and deleted files are skipped and listed. Source files come first, then tests, then config and docs. At most 20 files are checked and the rest are named.
@@ -54,7 +56,7 @@ A full sample report from a run with a fresh Workers AI budget is still to be ad
 
 Six sections, always in this order, with "none" when empty: Status, Blocking, Questions, Warnings, Not checked, Intent. Blocking items are `F1, F2, ...`, questions `Q1, ...`, warnings `W1, ...`. Each carries a key that stays the same across runs of the same pull request. A blocking item on a line the pull request does not change is tagged pre-existing: it is reported with its quote and keeps the rule at FAIL, but it does not fail the check unless `strict` is set.
 
-Over the API the report also ends with a JSON block that mirrors it: `schema_version`, `check_id`, the rules with their status and whether each blocks, the findings, the cross-file verdicts with the facts they cite, the intent comparison, what changed since the last run, what was not checked, the number of model calls, and how to run the same check again.
+Over the API the report also ends with a JSON block that mirrors it: `schema_version`, `check_id`, the runner, the rules with their status and whether each blocks, the findings, the cross-file verdicts with the facts they cite, the intent comparison, what changed since the last run, what was not checked, the number of model calls, and how to run the same check again.
 
 ## Rules in the repository
 
@@ -118,13 +120,14 @@ Then open http://localhost:5173.
 
 ## Deploy
 
-`npm run deploy` builds the app and deploys it with Wrangler. A push to `main` deploys automatically once the repository has the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The Worker secrets are `API_TOKEN` for the API and, optionally, `GITHUB_TOKEN` for a higher GitHub rate limit. The variable `AI_MODEL` switches the model.
+`npm run deploy` builds the app and deploys it with Wrangler, which also creates the `cf-ai-pr-checker-check` Workflow. A push to `main` deploys automatically once the repository has the secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The Worker secrets are `API_TOKEN` for the API and, optionally, `GITHUB_TOKEN` for a higher GitHub rate limit. The variable `AI_MODEL` switches the model and `CHECK_RUNNER=inline` runs checks inside the Durable Object instead of as Workflows.
 
 ## Known limits
 
 - The Workers AI Free plan allows 10,000 neurons a day. A check costs roughly one to three hundred per file, so the day's budget covers a few dozen files. When it runs out, every file lands under "Not checked" with the model's error and no rule can pass; the report says so rather than guessing.
 - A FAIL by absence ("every file has X" and it does not) cannot be placed on a line, so it always counts as introduced and blocks.
 - At most 20 files are checked per pull request. The rest are listed under "Not checked", and a rule whose scope includes them cannot PASS.
+- A check is one Workflow instance. The Workers Free plan runs 100 at once and limits what one step may return, so the selected diffs are trimmed to fit and any file dropped for that is listed under "Not checked".
 - GitHub allows 60 unauthenticated API requests an hour. A `GITHUB_TOKEN` Worker secret lifts that.
 - The model is small and sometimes wrong. The guards make a wrong answer land in Questions rather than as a confident PASS; they do not make it right.
 

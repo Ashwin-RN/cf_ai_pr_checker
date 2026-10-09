@@ -18,6 +18,13 @@
       }
     ]
   },
+  "workflows": [
+    {
+      "name": "cf-ai-pr-checker-check",
+      "binding": "CHECK_WORKFLOW",
+      "class_name": "CheckWorkflow"
+    }
+  ],
   "migrations": [
     {
       "new_sqlite_classes": ["ChatAgent"],

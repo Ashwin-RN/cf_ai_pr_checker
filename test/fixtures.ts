@@ -76,6 +76,7 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
     rulesSource: "the rules saved in this workspace",
     rules,
     strict: false,
+    runner: "inline",
     status: "pass",
     ruleStatuses: rules.map((r) => ({
       rule: r.id,

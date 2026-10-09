@@ -56,6 +56,13 @@ function jsonSchemaOf(schema: z.ZodType): Record<string, unknown> {
 
 const CAPACITY = /429|3040|capacity|rate limit|too many/i;
 
+// The default model. The AI_MODEL variable overrides it.
+export const DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+export function modelFor(env: { AI_MODEL?: string }): string {
+  return env.AI_MODEL || DEFAULT_MODEL;
+}
+
 export function workersAiText(ai: Ai, model: string): TextModel {
   return (messages, responseFormat) =>
     ai.run(

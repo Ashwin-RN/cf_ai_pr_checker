@@ -16,8 +16,10 @@ import { MORE_FILES, selectFiles } from "./select";
 import { collectFacts, settleCrossFile } from "./settle";
 import type {
   CheckResult,
+  CrossFileVerdict,
   FileCheck,
   FileVerdict,
+  Intent,
   Pr,
   PrFile,
   PreviousRun,
@@ -25,6 +27,7 @@ import type {
   ProgressFile,
   Rule,
   RuleSet,
+  Runner,
   Skipped
 } from "./types";
 import {
@@ -46,6 +49,7 @@ export type CheckInput = {
   // Rules given with the request. When null, `deps.resolveRules` decides.
   rules: RuleSet | null;
   strict?: boolean;
+  runner?: Runner;
   previous?: PreviousRun | null;
 };
 
@@ -283,7 +287,8 @@ export async function checkFile(
   };
 }
 
-async function mapLimit<T, R>(
+// Runs `fn` over the items, at most `limit` at a time, keeping the order.
+export async function mapLimit<T, R>(
   items: T[],
   limit: number,
   fn: (item: T, index: number) => Promise<R>
@@ -344,33 +349,17 @@ async function loadContent(
   };
 }
 
-// The engine. Fetch, resolve rules, select, check each file in parallel,
-// verify, settle across files, compare with the description, merge, diff.
-export async function runCheck(
-  input: CheckInput,
-  deps: CheckDeps
-): Promise<CheckResult> {
-  const now = deps.now ?? Date.now;
-  const startedAt = now();
-  const files: ProgressFile[] = [];
-  const progress = (stage: Progress["stage"], message: string) =>
-    deps.onProgress?.({
-      checkId: input.id,
-      stage,
-      message,
-      files: files.map((f) => ({ ...f }))
-    });
+// The check is four stages. `runCheck` runs them in one process; the
+// Workflow runs each as a step. Both produce the same result.
 
-  progress("fetching", "Fetching the pull request");
-  const pr = await loadPr(input.prUrl, deps);
-  const ruleSet = input.rules ?? (await deps.resolveRules?.(pr)) ?? null;
-  if (!ruleSet || ruleSet.rules.length === 0) {
-    throw new CheckError(
-      "no_rules",
-      "There are no rules to check against yet."
-    );
-  }
-  const rules = ruleSet.rules;
+export type Fetched = { pr: Pr; checked: PrFile[]; notChecked: Skipped[] };
+
+// Stage 1: the pull request, which of its files get checked, and which do not.
+export async function fetchStage(
+  prUrl: string,
+  deps: CheckDeps
+): Promise<Fetched> {
+  const pr = await loadPr(prUrl, deps);
   const selection = selectFiles(pr.files);
   const notChecked: Skipped[] = [...selection.skipped];
   if (pr.fileListTruncated) {
@@ -380,56 +369,86 @@ export async function runCheck(
       coverage: true
     });
   }
-  for (const f of selection.checked)
-    files.push({ path: f.path, state: "queued" });
-  progress("checking", `Checking ${selection.checked.length} files`);
+  return { pr, checked: selection.checked, notChecked };
+}
 
-  let modelCalls = 0;
-  const callJson: JsonCaller = (messages, schema) => {
-    modelCalls++;
-    return deps.callJson(messages, schema);
-  };
+// The rules for this check: the ones given with the request, else whatever
+// `deps.resolveRules` finds for the pull request.
+export async function resolveRuleSet(
+  input: CheckInput,
+  pr: Pr,
+  deps: CheckDeps
+): Promise<RuleSet> {
+  const ruleSet = input.rules ?? (await deps.resolveRules?.(pr)) ?? null;
+  if (!ruleSet || ruleSet.rules.length === 0) {
+    throw new CheckError(
+      "no_rules",
+      "There are no rules to check against yet."
+    );
+  }
+  return ruleSet;
+}
+
+// Stage 2, once per file: its content at the head commit, then the check.
+// Only the file's own patch is read from the pull request, so the file list
+// can travel without diffs.
+export async function fileStage(
+  rules: Rule[],
+  pr: Pr,
+  file: PrFile,
+  callJson: JsonCaller,
+  deps: CheckDeps
+): Promise<FileCheck> {
   const allPaths = new Set(pr.files.map((f) => f.path));
-  const results = await mapLimit(
-    selection.checked,
-    limits.parallelModelCalls,
-    async (file, i) => {
-      files[i].state = "checking";
-      progress("checking", `Checking ${file.path}`);
-      const content = await loadContent(pr, file, deps);
-      const checked = await checkFile(
-        rules,
-        file,
-        allPaths,
-        callJson,
-        content.text,
-        content.note
-      );
-      files[i].state = checked.state === "checked" ? "checked" : "failed";
-      deps.onFile?.(checked);
-      progress(
-        "checking",
-        `${files.filter((f) => f.state === "checked" || f.state === "failed").length} of ${files.length} files done`
-      );
-      return checked;
-    }
-  );
+  const content = await loadContent(pr, file, deps);
+  return checkFile(rules, file, allPaths, callJson, content.text, content.note);
+}
 
-  progress("checking", "Settling rules across files");
+// Stage 3: rules that span files, and the description against the facts.
+export async function settleStage(
+  rules: Rule[],
+  pr: Pr,
+  results: FileCheck[],
+  callJson: JsonCaller
+): Promise<{ crossFile: CrossFileVerdict[]; intent: Intent }> {
   const facts = collectFacts(pr, results);
   const [crossFile, intent] = await Promise.all([
     settleCrossFile(rules, pr, results, facts, callJson),
     checkIntent(pr, facts, callJson)
   ]);
+  return { crossFile, intent };
+}
 
+export type Assembly = {
+  input: CheckInput;
+  pr: Pr;
+  ruleSet: RuleSet;
+  results: FileCheck[];
+  notChecked: Skipped[];
+  crossFile: CrossFileVerdict[];
+  intent: Intent;
+  modelCalls: number;
+  startedAt: number;
+  finishedAt: number;
+};
+
+// Stage 4: merge per rule, diff against the last run, shape the result. Pure.
+export function assemble(a: Assembly): CheckResult {
+  const { input, pr, ruleSet, results, notChecked, crossFile, intent } = a;
   const strict = input.strict ?? false;
-  const statuses = ruleStatuses(rules, results, notChecked, crossFile, strict);
+  const statuses = ruleStatuses(
+    ruleSet.rules,
+    results,
+    notChecked,
+    crossFile,
+    strict
+  );
   const diffed = diffRun(
     input.previous ?? null,
-    buildFindings(rules, results, crossFile, intent),
+    buildFindings(ruleSet.rules, results, crossFile, intent),
     ruleSet.hash
   );
-  const result: CheckResult = {
+  return {
     schemaVersion: 2,
     id: input.id,
     workspace: input.workspace,
@@ -443,8 +462,9 @@ export async function runCheck(
     },
     rulesHash: ruleSet.hash,
     rulesSource: ruleSet.source,
-    rules,
+    rules: ruleSet.rules,
     strict,
+    runner: input.runner ?? "inline",
     status: overallStatus(statuses),
     ruleStatuses: statuses,
     findings: diffed.findings,
@@ -456,10 +476,102 @@ export async function runCheck(
     coverageComplete:
       notChecked.every((n) => !n.coverage) &&
       results.every((r) => r.state === "checked" && r.coverage === "full"),
-    modelCalls,
+    modelCalls: a.modelCalls,
+    startedAt: a.startedAt,
+    finishedAt: a.finishedAt
+  };
+}
+
+// Counts the calls made through a caller, so each stage can report its share.
+export function countCalls(callJson: JsonCaller): {
+  callJson: JsonCaller;
+  calls: () => number;
+} {
+  let n = 0;
+  return {
+    callJson: (messages, schema) => {
+      n++;
+      return callJson(messages, schema);
+    },
+    calls: () => n
+  };
+}
+
+// A snapshot of where a check stands, safe to hand to a stream.
+export function progressFor(
+  checkId: string,
+  stage: Progress["stage"],
+  message: string,
+  files: ProgressFile[]
+): Progress {
+  return { checkId, stage, message, files: files.map((f) => ({ ...f })) };
+}
+
+export function doneMessage(files: ProgressFile[]): string {
+  const done = files.filter(
+    (f) => f.state === "checked" || f.state === "failed"
+  ).length;
+  return `${done} of ${files.length} files done`;
+}
+
+// The engine in one process: fetch, resolve rules, check each file in
+// parallel, settle across files, merge, diff.
+export async function runCheck(
+  input: CheckInput,
+  deps: CheckDeps
+): Promise<CheckResult> {
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const files: ProgressFile[] = [];
+  const progress = (stage: Progress["stage"], message: string) =>
+    deps.onProgress?.(progressFor(input.id, stage, message, files));
+
+  progress("fetching", "Fetching the pull request");
+  const { pr, checked, notChecked } = await fetchStage(input.prUrl, deps);
+  const ruleSet = await resolveRuleSet(input, pr, deps);
+  for (const f of checked) files.push({ path: f.path, state: "queued" });
+  progress("checking", `Checking ${checked.length} files`);
+
+  const counted = countCalls(deps.callJson);
+  const results = await mapLimit(
+    checked,
+    limits.parallelModelCalls,
+    async (file, i) => {
+      files[i].state = "checking";
+      progress("checking", `Checking ${file.path}`);
+      const result = await fileStage(
+        ruleSet.rules,
+        pr,
+        file,
+        counted.callJson,
+        deps
+      );
+      files[i].state = result.state === "checked" ? "checked" : "failed";
+      deps.onFile?.(result);
+      progress("checking", doneMessage(files));
+      return result;
+    }
+  );
+
+  progress("checking", "Settling rules across files");
+  const { crossFile, intent } = await settleStage(
+    ruleSet.rules,
+    pr,
+    results,
+    counted.callJson
+  );
+  const result = assemble({
+    input,
+    pr,
+    ruleSet,
+    results,
+    notChecked,
+    crossFile,
+    intent,
+    modelCalls: counted.calls(),
     startedAt,
     finishedAt: now()
-  };
+  });
   progress("done", `Done: ${result.status.toUpperCase()}`);
   return result;
 }

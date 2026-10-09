@@ -58,3 +58,26 @@ export function selectFiles(files: PrFile[]): Selection {
   }
   return { checked, skipped };
 }
+
+// Keeps the selected files within a character budget, dropping from the end
+// of the priority order. What is dropped is a coverage gap, named as such.
+export function fitFiles(
+  checked: PrFile[],
+  maxChars: number
+): { checked: PrFile[]; dropped: Skipped[] } {
+  const kept: PrFile[] = [];
+  let used = 0;
+  for (const file of checked) {
+    used += JSON.stringify(file).length;
+    if (used > maxChars) break;
+    kept.push(file);
+  }
+  return {
+    checked: kept,
+    dropped: checked.slice(kept.length).map((file) => ({
+      path: file.path,
+      reason: "over the size budget of one Workflow step",
+      coverage: true
+    }))
+  };
+}

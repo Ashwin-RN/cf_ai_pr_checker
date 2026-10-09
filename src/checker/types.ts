@@ -126,6 +126,8 @@ export type RuleStatus = {
   detail: string;
 };
 export type CheckStatus = "pass" | "fail" | "unsure";
+// Where a check ran: as a Cloudflare Workflow, or inside the Durable Object.
+export type Runner = "workflow" | "inline";
 
 // What the last finished check of the same pull request found.
 export type PreviousRun = {
@@ -166,6 +168,7 @@ export type CheckResult = {
   rulesSource: string;
   rules: Rule[];
   strict: boolean;
+  runner: Runner;
   status: CheckStatus;
   ruleStatuses: RuleStatus[];
   findings: Finding[];

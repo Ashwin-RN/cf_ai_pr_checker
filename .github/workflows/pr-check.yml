@@ -14,7 +14,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       CHECKER_URL: ${{ secrets.CHECKER_URL }}
       CHECKER_API_TOKEN: ${{ secrets.CHECKER_API_TOKEN }}

@@ -113,6 +113,27 @@ export class Store {
       VALUES (${checkId}, ${file.path}, ${file.state}, ${JSON.stringify(rest)}, ${raw})`;
   }
 
+  // Where a check stands: running, finished with a result, or failed.
+  checkState(id: string): {
+    status: string;
+    error: string | null;
+    result: CheckResult | null;
+  } | null {
+    const row = this.sql<{
+      status: string;
+      error: string | null;
+      result_json: string | null;
+    }>`SELECT status, error, result_json FROM checks WHERE id = ${id}`[0];
+    if (!row) return null;
+    return {
+      status: row.status,
+      error: row.error,
+      result: row.result_json
+        ? (JSON.parse(row.result_json) as CheckResult)
+        : null
+    };
+  }
+
   getCheck(id: string): CheckResult | null {
     const row = this.sql<{ result_json: string | null }>`
       SELECT result_json FROM checks WHERE id = ${id}`[0];

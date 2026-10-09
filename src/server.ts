@@ -5,7 +5,7 @@ import {
   createUIMessageStreamResponse,
   type UIMessage
 } from "ai";
-import { CheckError, runCheck } from "./checker";
+import { CheckError, type CheckInput, runCheck } from "./checker";
 import {
   GithubError,
   canonicalPrUrl,
@@ -13,7 +13,8 @@ import {
   findPrUrl,
   parsePrUrl
 } from "./checker/github";
-import { jsonCaller, workersAiText } from "./checker/model";
+import { limits } from "./checker/limits";
+import { jsonCaller, modelFor, workersAiText } from "./checker/model";
 import { machineReport, renderReport } from "./checker/report";
 import {
   defaultRules,
@@ -22,21 +23,33 @@ import {
   parseRuleText,
   parseRulesFile
 } from "./checker/rules";
-import type { CheckResult, Pr, Progress, Rule, RuleSet } from "./checker/types";
+import type {
+  CheckResult,
+  FileCheck,
+  Pr,
+  Progress,
+  Rule,
+  RuleSet
+} from "./checker/types";
 import { Store, type Sql } from "./store";
+import type { CheckParams, RulesLookup } from "./workflow";
 import { streamChatResponse, toChatMessages } from "./workers-ai";
 
-declare global {
-  interface Env {
-    API_TOKEN?: string;
-    GITHUB_TOKEN?: string;
-  }
-}
+export { CheckWorkflow } from "./workflow";
+
+// The generated `Env` carries the bindings. Secrets and variables are
+// optional because a deployment may leave them unset.
+export type AppEnv = Env & {
+  API_TOKEN?: string;
+  GITHUB_TOKEN?: string;
+  AI_MODEL?: string;
+  // "workflow" (the default) runs a check as a Cloudflare Workflow;
+  // "inline" runs it inside the Durable Object.
+  CHECK_RUNNER?: string;
+};
 
 export type CheckMessage = UIMessage<unknown, { check: Progress }>;
 
-// The default model. The AI_MODEL variable overrides it.
-const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const RULES_FILE = "pr-rules.md";
 const WORKSPACE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CHAT_HISTORY = 12;
@@ -63,6 +76,14 @@ function reply(markdown: string): Response {
     }
   });
   return createUIMessageStreamResponse({ stream });
+}
+
+function assistantMessage(text: string): UIMessage {
+  return {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    parts: [{ type: "text", text }]
+  };
 }
 
 function lastUserText(messages: UIMessage[]): string {
@@ -106,19 +127,39 @@ function apiBody(result: CheckResult): Record<string, unknown> {
   };
 }
 
+// The message a chat check ends with: the report, or what went wrong.
+function checkOutcomeText(e: unknown): string {
+  return e instanceof CheckError
+    ? e.message
+    : `The check failed: ${(e as Error).message}`;
+}
+
 type CheckOptions = {
   rules?: RuleSet | null;
   strict?: boolean;
+  source?: "chat" | "api";
   onProgress?: (progress: Progress) => void;
 };
 
-export class ChatAgent extends AIChatAgent<Env> {
+// A check this instance is waiting on: where its progress goes and how its
+// end is delivered.
+type Waiter = {
+  resolve: (result: CheckResult) => void;
+  reject: (error: Error) => void;
+  onProgress?: (progress: Progress) => void;
+};
+
+export class ChatAgent extends AIChatAgent<AppEnv> {
   maxPersistedMessages = 100;
   chatRecovery = true;
   private store = new Store((<T>(
     s: TemplateStringsArray,
     ...v: Parameters<Sql>[1][]
   ) => this.sql<T>(s, ...v)) as Sql);
+  private waiters = new Map<string, Waiter>();
+  // Checks whose end reached a waiter, so the Workflow's completion callback
+  // does not deliver the report a second time.
+  private delivered = new Set<string>();
 
   async onStart() {
     this.store.init();
@@ -147,7 +188,7 @@ export class ChatAgent extends AIChatAgent<Env> {
     );
     return streamChatResponse(
       this.env.AI,
-      this.model(),
+      modelFor(this.env),
       [
         { role: "system", content: `${SYSTEM_PROMPT}\n\n${context}` },
         ...history
@@ -187,7 +228,8 @@ export class ChatAgent extends AIChatAgent<Env> {
       try {
         const result = await this.check(crypto.randomUUID(), body.prUrl, {
           rules,
-          strict: body.strict === true
+          strict: body.strict === true,
+          source: "api"
         });
         return json(apiBody(result));
       } catch (e) {
@@ -222,12 +264,110 @@ export class ChatAgent extends AIChatAgent<Env> {
     return this.store.getCheck(id);
   }
 
-  private model(): string {
-    return (this.env as { AI_MODEL?: string }).AI_MODEL || MODEL;
+  // Called by the Workflow over RPC: the rules for a pull request, with a
+  // failure kept as data because an error does not keep its kind across RPC.
+  async rulesFor(pr: Pr): Promise<RulesLookup> {
+    try {
+      const set = await this.resolveRules(pr);
+      return set && set.rules.length
+        ? { ok: true, set }
+        : {
+            ok: false,
+            kind: "no_rules",
+            message: "There are no rules to check against yet."
+          };
+    } catch (e) {
+      if (e instanceof CheckError) {
+        return { ok: false, kind: e.kind, message: e.message };
+      }
+      throw e;
+    }
+  }
+
+  // Called by the Workflow over RPC from inside a file step.
+  saveWorkflowFile(checkId: string, file: FileCheck): void {
+    this.store.saveFileResult(checkId, file);
+  }
+
+  // Called by the Workflow over RPC from its last step.
+  finishWorkflowCheck(result: CheckResult): void {
+    this.store.finishCheck(result);
+    const waiter = this.waiters.get(result.id);
+    if (waiter) {
+      this.delivered.add(result.id);
+      waiter.resolve(result);
+    }
+  }
+
+  failWorkflowCheck(
+    checkId: string,
+    kind: CheckError["kind"],
+    message: string
+  ): void {
+    this.store.failCheck(checkId, message);
+    const waiter = this.waiters.get(checkId);
+    if (waiter) {
+      this.delivered.add(checkId);
+      waiter.reject(new CheckError(kind, this.describeFailure(kind, message)));
+    }
+  }
+
+  async onWorkflowProgress(
+    _workflowName: string,
+    workflowId: string,
+    progress: unknown
+  ) {
+    this.waiters.get(workflowId)?.onProgress?.(progress as Progress);
+  }
+
+  async onWorkflowComplete(_workflowName: string, workflowId: string) {
+    await this.deliverIfLost(workflowId);
+  }
+
+  // The Workflow died outside its own handling. The check is over either way.
+  async onWorkflowError(
+    _workflowName: string,
+    workflowId: string,
+    error: string
+  ) {
+    const state = this.store.checkState(workflowId);
+    if (state && !state.result) this.store.failCheck(workflowId, error);
+    const waiter = this.waiters.get(workflowId);
+    if (waiter) {
+      this.delivered.add(workflowId);
+      waiter.reject(new CheckError("error", `The check failed: ${error}`));
+    }
+    await this.deliverIfLost(workflowId);
+  }
+
+  // A chat check whose stream this instance no longer has, because the
+  // instance restarted while the Workflow ran, still gets its report: it is
+  // appended to the conversation here.
+  private async deliverIfLost(workflowId: string): Promise<void> {
+    const info = this.getWorkflow(workflowId);
+    const source = (info?.metadata as { source?: string } | undefined)?.source;
+    if (source === "chat" && !this.delivered.has(workflowId)) {
+      const state = this.store.checkState(workflowId);
+      const text = state?.result
+        ? renderReport(state.result, { json: false })
+        : `The check failed: ${state?.error ?? "unknown error"}`;
+      await this.saveMessages((messages) => [
+        ...messages,
+        assistantMessage(text)
+      ]);
+    }
+    this.delivered.delete(workflowId);
+    this.deleteWorkflow(workflowId);
   }
 
   private callJson() {
-    return jsonCaller(workersAiText(this.env.AI, this.model()));
+    return jsonCaller(workersAiText(this.env.AI, modelFor(this.env)));
+  }
+
+  private usesWorkflow(): boolean {
+    return (
+      this.env.CHECK_RUNNER !== "inline" && Boolean(this.env.CHECK_WORKFLOW)
+    );
   }
 
   // Interprets rule text once per distinct text: the same text, already
@@ -255,8 +395,6 @@ export class ChatAgent extends AIChatAgent<Env> {
     return out;
   }
 
-  // Rules from the checked repository come first; the workspace's own are
-  // the fallback.
   // The rules file at a commit or branch, as rule texts; null without one.
   private async rulesFileAt(pr: Pr, at: string): Promise<string[] | null> {
     let file: Awaited<ReturnType<typeof fetchRawFile>>;
@@ -274,6 +412,8 @@ export class ChatAgent extends AIChatAgent<Env> {
     return texts.length ? texts : null;
   }
 
+  // Rules from the checked repository come first; the workspace's own are
+  // the fallback.
   private async resolveRules(pr: Pr): Promise<RuleSet | null> {
     const fromBase = await this.rulesFileAt(pr, pr.baseRef);
     if (fromBase) {
@@ -334,13 +474,13 @@ export class ChatAgent extends AIChatAgent<Env> {
           writer.write({ type: "data-check", id: `check-${id}`, data });
         let markdown: string;
         try {
-          const result = await this.check(id, prUrl, { onProgress });
+          const result = await this.check(id, prUrl, {
+            onProgress,
+            source: "chat"
+          });
           markdown = renderReport(result, { json: false });
         } catch (e) {
-          markdown =
-            e instanceof CheckError
-              ? e.message
-              : `The check failed: ${(e as Error).message}`;
+          markdown = checkOutcomeText(e);
           onProgress({
             checkId: id,
             stage: "error",
@@ -357,8 +497,15 @@ export class ChatAgent extends AIChatAgent<Env> {
     return createUIMessageStreamResponse({ stream });
   }
 
-  // Runs the engine with real bindings. It does not take the chat's abort
-  // signal: a check keeps going when the client disconnects.
+  private describeFailure(kind: CheckError["kind"], message: string): string {
+    return kind === "no_rules"
+      ? `No rules to check against: the repository has no ${RULES_FILE} and this workspace has no saved rules. Send a message that starts with \`rules:\` and has one rule per line.`
+      : message;
+  }
+
+  // Runs a check with real bindings, as a Workflow or in this instance. It
+  // does not take the chat's abort signal: a check keeps going when the
+  // client disconnects.
   private async check(
     id: string,
     prUrl: string,
@@ -372,39 +519,100 @@ export class ChatAgent extends AIChatAgent<Env> {
       );
     }
     const canonical = canonicalPrUrl(ref);
-    const previous = this.store.previousCheck(canonical);
+    const input: CheckInput = {
+      id,
+      workspace: this.name,
+      prUrl: canonical,
+      rules: options.rules ?? null,
+      strict: options.strict ?? false,
+      previous: this.store.previousCheck(canonical)
+    };
     this.store.startCheck(id, canonical);
+    return this.usesWorkflow()
+      ? this.checkByWorkflow(input, options)
+      : this.checkInline(input, options);
+  }
+
+  private async checkInline(
+    input: CheckInput,
+    options: CheckOptions
+  ): Promise<CheckResult> {
     try {
-      const result = await runCheck(
-        {
-          id,
-          workspace: this.name,
-          prUrl: canonical,
-          rules: options.rules ?? null,
-          strict: options.strict,
-          previous
-        },
-        {
-          fetch: (input, init) => fetch(input, init),
-          callJson: this.callJson(),
-          githubToken: this.env.GITHUB_TOKEN,
-          onProgress: options.onProgress,
-          onFile: (file) => this.store.saveFileResult(id, file),
-          resolveRules: (pr) => this.resolveRules(pr)
-        }
-      );
+      const result = await runCheck(input, {
+        fetch: (i, init) => fetch(i, init),
+        callJson: this.callJson(),
+        githubToken: this.env.GITHUB_TOKEN,
+        onProgress: options.onProgress,
+        onFile: (file) => this.store.saveFileResult(input.id, file),
+        resolveRules: (pr) => this.resolveRules(pr)
+      });
       this.store.finishCheck(result);
       return result;
     } catch (e) {
-      this.store.failCheck(id, (e as Error).message);
-      if (e instanceof CheckError && e.kind === "no_rules") {
-        throw new CheckError(
-          "no_rules",
-          `No rules to check against: the repository has no ${RULES_FILE} and this workspace has no saved rules. Send a message that starts with \`rules:\` and has one rule per line.`
-        );
+      this.store.failCheck(input.id, (e as Error).message);
+      if (e instanceof CheckError) {
+        throw new CheckError(e.kind, this.describeFailure(e.kind, e.message));
       }
       throw e;
     }
+  }
+
+  // Starts the Workflow and waits for its end. The finish and fail RPCs
+  // resolve the wait; the stored row is read as well, in case this instance
+  // missed them. Past the deadline the Workflow is stopped and the check fails.
+  private checkByWorkflow(
+    input: CheckInput,
+    options: CheckOptions
+  ): Promise<CheckResult> {
+    const id = input.id;
+    const params: CheckParams = {
+      ...input,
+      runner: "workflow",
+      startedAt: Date.now()
+    };
+    return new Promise<CheckResult>((resolve, reject) => {
+      const deadline = Date.now() + limits.checkWaitMs;
+      const stop = () => {
+        clearInterval(timer);
+        this.waiters.delete(id);
+      };
+      const waiter: Waiter = {
+        resolve: (result) => {
+          stop();
+          resolve(result);
+        },
+        reject: (error) => {
+          stop();
+          reject(error);
+        },
+        onProgress: options.onProgress
+      };
+      const timer = setInterval(() => {
+        const state = this.store.checkState(id);
+        if (state?.result) {
+          waiter.resolve(state.result);
+        } else if (state?.status === "error") {
+          waiter.reject(
+            new CheckError("error", state.error ?? "The check failed.")
+          );
+        } else if (Date.now() > deadline) {
+          const minutes = Math.round(limits.checkWaitMs / 60_000);
+          const message = `The check did not finish within ${minutes} minutes.`;
+          this.terminateWorkflow(id).catch(() => {});
+          this.store.failCheck(id, message);
+          waiter.reject(new CheckError("error", message));
+        }
+      }, limits.checkPollMs);
+      this.waiters.set(id, waiter);
+      this.runWorkflow("CHECK_WORKFLOW", params, {
+        id,
+        agentBinding: "ChatAgent",
+        metadata: { prUrl: input.prUrl, source: options.source ?? "api" }
+      }).catch((e: Error) => {
+        this.store.failCheck(id, e.message);
+        waiter.reject(e);
+      });
+    });
   }
 }
 
@@ -418,7 +626,7 @@ function sameToken(given: string, expected: string): boolean {
 }
 
 // Bearer token, then hand the request to the workspace's Durable Object.
-async function handleApi(request: Request, env: Env): Promise<Response> {
+async function handleApi(request: Request, env: AppEnv): Promise<Response> {
   if (!env.API_TOKEN) {
     return json(
       { error: "The API is off until the API_TOKEN secret is set." },
@@ -458,7 +666,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: AppEnv) {
     if (new URL(request.url).pathname.startsWith("/api/")) {
       return handleApi(request, env);
     }
@@ -467,4 +675,4 @@ export default {
       new Response("Not found", { status: 404 })
     );
   }
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<AppEnv>;
