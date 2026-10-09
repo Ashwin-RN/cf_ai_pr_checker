@@ -83,6 +83,11 @@ export type FileCheck = {
   verdicts: FileVerdict[];
   facts: string[];
   warnings: FileWarning[];
+  // For each finding of the last check on this path that quoted a line, by
+  // key: true when this check showed that line to the model again or the
+  // line is gone from the file, false when the line is still in the file
+  // but outside the parts shown.
+  seen: Record<string, boolean>;
   raw: string | null;
 };
 
@@ -110,6 +115,31 @@ export type Intent = {
 
 export type FindingKind = "blocking" | "question" | "warning";
 
+// A question answered by the author: the rule is met in a way the check
+// could not see. It is the author's word, not evidence, and it is keyed by
+// the finding it answers, within one pull request.
+export type Attestation = {
+  key: string;
+  rule: number | null;
+  path: string;
+  question: string;
+  answer: string;
+  checkId: string;
+  headSha: string;
+  rulesHash: string;
+  createdAt: number;
+};
+
+// How a question on a finding was answered, and whether the answer counts
+// toward the rule's status in this run.
+export type Answered = {
+  answer: string;
+  headSha: string;
+  at: number;
+  counted: boolean;
+  note: string | null;
+};
+
 export type Finding = {
   id: string;
   key: string;
@@ -126,22 +156,26 @@ export type Finding = {
   resolution: string | null;
   question: string | null;
   note: string | null;
+  attestation: Answered | null;
 };
 
 // `complete` is false when a file in the rule's scope was not covered for
-// it, whatever the status says.
+// it, whatever the status says. `attested` is true when the status is PASS
+// on the author's answers rather than on evidence the check saw.
 export type RuleStatus = {
   rule: number;
   status: Verdict;
   blocking: boolean;
   complete: boolean;
+  attested: boolean;
   detail: string;
 };
 export type CheckStatus = "pass" | "fail" | "unsure";
 // Where a check ran: as a Cloudflare Workflow, or inside the Durable Object.
 export type Runner = "workflow" | "inline";
 
-// What the last finished check of the same pull request found.
+// What the last finished check of the same pull request found, plus what it
+// carried as not assessed, so an item stays known until a run looks at it.
 export type PreviousRun = {
   checkId: string;
   headSha: string;
@@ -152,6 +186,8 @@ export type PreviousRun = {
     kind: FindingKind;
     rule: number | null;
     path: string;
+    line: number | null;
+    quote: string | null;
     summary: string;
   }>;
 };

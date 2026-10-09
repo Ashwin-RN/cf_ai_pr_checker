@@ -26,7 +26,14 @@ const status = (
   s: RuleStatus["status"],
   blocking = s === "FAIL",
   complete = true
-): RuleStatus => ({ rule: ruleId, status: s, blocking, complete, detail: "" });
+): RuleStatus => ({
+  rule: ruleId,
+  status: s,
+  blocking,
+  complete,
+  attested: false,
+  detail: ""
+});
 
 const settle = (
   verdict: CrossFileVerdict["verdict"],
@@ -55,6 +62,7 @@ describe("ruleStatuses", () => {
       status: "FAIL",
       blocking: true,
       complete: true,
+      attested: false,
       detail: "fails in b.ts:3"
     });
   });
@@ -74,9 +82,50 @@ describe("ruleStatuses", () => {
       status: "FAIL",
       blocking: false,
       complete: true,
+      attested: false,
       detail: "fails in b.ts:3 on a line this pull request does not change"
     });
     expect(ruleStatuses(rules, files, [], [], true)[0].blocking).toBe(true);
+  });
+
+  it("does not let a failure on an unchanged line hide a question on another file", () => {
+    const old = file("a.ts", [
+      verdict(1, "FAIL", {
+        quote: "console.log(x)",
+        line: 3,
+        origin: "pre-existing"
+      })
+    ]);
+    const unverified = [
+      old,
+      file("b.ts", [verdict(1, "FAIL", { verified: false })])
+    ];
+    expect(ruleStatuses(rules, unverified, [])[0]).toMatchObject({
+      status: "UNSURE",
+      blocking: false,
+      complete: true,
+      detail:
+        "possible fail in b.ts, quote not verified; also fails in a.ts:3 on a line this pull request does not change"
+    });
+    expect(overallStatus(ruleStatuses(rules, unverified, []))).toBe("unsure");
+    const asked = [old, file("b.ts", [verdict(1, "UNSURE")])];
+    expect(ruleStatuses(rules, asked, [])[0].detail).toBe(
+      "needs an answer for b.ts; also fails in a.ts:3 on a line this pull request does not change"
+    );
+    const claimed = [
+      old,
+      file("b.ts", [verdict(2, "PASS", { verified: false })])
+    ];
+    expect(ruleStatuses(rules, claimed, [])[0]).toMatchObject({
+      status: "FAIL",
+      blocking: false
+    });
+    // Under strict the failure blocks, and nothing outranks that.
+    expect(ruleStatuses(rules, unverified, [], [], true)[0]).toMatchObject({
+      status: "FAIL",
+      blocking: true,
+      detail: "fails in a.ts:3 on a line this pull request does not change"
+    });
   });
 
   it("names the introduced failure first when both kinds exist", () => {
@@ -159,6 +208,25 @@ describe("ruleStatuses", () => {
     );
   });
 
+  it("counts a file checked around its changes as a gap for every rule under strict", () => {
+    const windowed = file("src/a.ts", [verdict(1, "PASS")], {
+      coverage: "changes",
+      chunks: 2
+    });
+    expect(covers(windowed, rules[0], true)).toBe(false);
+    expect(covers(windowed, spanning, true)).toBe(false);
+    expect(ruleGaps(rules[0], [windowed], [], true)).toEqual(["src/a.ts"]);
+    expect(ruleStatuses(rules, [windowed], [], [], true)[0]).toMatchObject({
+      status: "UNSURE",
+      complete: false,
+      detail: "passes on the checked files; not checked: src/a.ts"
+    });
+    expect(ruleStatuses(rules, [windowed], [])[0]).toMatchObject({
+      status: "PASS",
+      complete: true
+    });
+  });
+
   it("scopes the coverage gap to the rule's directories", () => {
     const scoped = [{ ...rule(1, "No logs in src"), appliesTo: ["src/"] }];
     const files = [file("src/a.ts", [verdict(1, "PASS")])];
@@ -220,6 +288,7 @@ describe("ruleStatuses", () => {
         status: "FAIL",
         blocking: true,
         complete: true,
+        attested: false,
         detail: "fails across files: settled"
       });
       const failed = [file("src/a.ts", [verdict(2, "FAIL", { line: 1 })])];
@@ -321,9 +390,51 @@ describe("gateCrossFile", () => {
     });
   });
 
-  it("leaves the other verdicts alone", () => {
+  it("turns a PASS into a question when facts were capped or cut, not on a coverage gap alone", () => {
+    const capped = [
+      file("src/a.ts", [], {
+        facts: Array.from({ length: limits.factsPerFile }, (_, i) => `f${i}`)
+      })
+    ];
+    expect(
+      gateCrossFile(crossRules, [settle("PASS")], capped, [], false)[0]
+    ).toMatchObject({
+      verdict: "UNSURE",
+      note: "a pass across files stands only on complete facts; more facts than could be listed for src/a.ts",
+      question:
+        "On the facts seen rule 2 passes (settled). Does this pull request make a change the rule applies to that the facts did not list?"
+    });
+    expect(
+      gateCrossFile(crossRules, [settle("PASS")], files, [], true)[0]
+    ).toMatchObject({
+      verdict: "UNSURE",
+      note: "a pass across files stands only on complete facts; the fact list was cut at its cap"
+    });
+    // A file not checked turns a PASS into UNSURE at the merge, with its own detail.
+    const gap = [{ path: "src/b.ts", reason: "cap", coverage: true }];
+    expect(
+      gateCrossFile(crossRules, [settle("PASS")], files, gap, false)
+    ).toEqual([settle("PASS")]);
+  });
+
+  it("counts a windowed file as a gap for a cross-file FAIL under strict", () => {
+    const windowed = [
+      file("src/a.ts", [], { coverage: "changes", facts: ["adds f"] })
+    ];
+    expect(
+      gateCrossFile(crossRules, [settle("FAIL")], windowed, [], false)
+    ).toEqual([settle("FAIL")]);
+    expect(
+      gateCrossFile(crossRules, [settle("FAIL")], windowed, [], false, true)[0]
+    ).toMatchObject({
+      verdict: "UNSURE",
+      note: "a fail across files stands only on complete facts; not checked: src/a.ts"
+    });
+  });
+
+  it("leaves UNSURE and NA alone", () => {
     const gap = [{ path: "x", reason: "", coverage: true }];
-    const others = [settle("PASS"), settle("UNSURE"), settle("NA")];
+    const others = [settle("UNSURE"), settle("NA")];
     expect(gateCrossFile(crossRules, others, files, gap, true)).toEqual(others);
   });
 });

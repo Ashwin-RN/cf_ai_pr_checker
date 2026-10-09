@@ -185,3 +185,36 @@ The Workers AI cap from the day before had not lifted at 03:00 UTC despite the d
 - A file checked in windows is prompted as parts even when there is one window, and counts as checked for its change: complete for a "must not" rule and a rule that spans files, a gap for a per-file "must" rule.
 - Finding keys no longer include the kind, so a FAIL that becomes a question keeps its key. A previous finding whose file or step was not checked again is listed as not assessed rather than resolved. Cross-file findings sit at `(across files)`.
 - The README says what the cross-file step rests on and what a windowed file does and does not cover.
+
+## 2026-10-09: M4, the MCP server and the answer loop
+
+**Prompt:**
+
+> can you start m4?
+
+**What came out of it:** the branch `m4-mcp`. The same engine is now an MCP server, and a question in a report can be answered.
+
+- `McpAgent` from the Agents SDK serves `/mcp` over Streamable HTTP behind the API token. The workspace is named in the URL and bound to the session; each session is a Durable Object of its own, and its tools reach the workspace's agent over RPC, the way the Workflow does. The tools are `check_pr`, `get_check`, `answer_question`, `get_rules`, `set_rules` and `list_checks`; each returns the text an agent reads and the same as structured content. `check_pr` sends progress notifications to a client that asks for them, and the check keeps running if the stream is cut: a client that gave its own `check_id` reads the result back with `get_check`, and `list_checks` finds it otherwise.
+- An answer is stored per pull request and finding key, with the commit and the rule set it was given against. The next check applies answers after the merge and before the diff: a question with an answer is listed as answered, after the open ones, and a rule that was UNSURE only because of answered questions passes by attestation, marked in the rule table, the status line and the JSON. An answer never touches a FAIL or a coverage gap, counts for nothing under strict, and is stale once the rules change. The same answer path serves the chat (`answer Q2: ...`), `POST /api/answer` and MCP, and replies with what the same evidence gives with the answers so far, without a model call.
+- The `verified` status check in CI stays red on a pass by attestation: a pass on the author's word is not a verified one.
+- The router hook checks the Durable Object class as well as the instance name, so an MCP session cannot be reached over the chat route.
+- The tool contract is tested over the SDK's in-memory transport against a faked workspace; the answer logic is tested on its own and through the assembly, where an answered item stays open in the diff rather than resolved. Live on a local server, with no model calls: the token and workspace guards, the router, a session over Streamable HTTP, and every tool through RPC to the workspace agent. A check over MCP against a real pull request waits, like the evaluation, for a day of Workers AI budget.
+- Left for later: `waive_rule`, which needs the exceptions table and the handling of a waived FAIL in the report and CI; and fetching a named file on request.
+
+**Prompt:**
+
+> [a third review, pasted without comment, of the commit `be167a5`]
+
+**What came out of it:** eleven findings, each reproduced by reading the code, and a change for each on the same branch, with a test named after the review's scenario.
+
+- A failure on a line the pull request does not change no longer outranks an open point on another file: the rule reads UNSURE and names both, so the check cannot pass over an unanswered question. Once the question is answered the rule returns to that failure, not to PASS.
+- A file checked in parts needs a verdict from every part; a part that says nothing about a rule leaves it UNSURE.
+- On a file checked in parts, an earlier finding counts as assessed only when the line it quoted was shown to the model again or is gone from the file, so a violation outside the windows is listed as not assessed rather than resolved. Under strict such a file is a coverage gap for every rule.
+- A cross-file PASS is held to uncut facts like a FAIL: a capped or cut fact list makes it a question.
+- A directory scope is kept only when the rule names the path itself; "src/ or test/" no longer admits `src/test/`.
+- The evaluation scores a blocking expectation on its own, so a rule that should block and comes back UNSURE fails the run.
+- An answer no longer settles a different question that a later push raises under the same key.
+- A finding one run could not assess is carried to the next until a run looks at it.
+- A result stored by an earlier build is filled in on read instead of failing to render.
+- A client-supplied check id is kept apart per workspace inside the Workflow, whose instance ids are unique per Workflow.
+- An answer that cites a pull request link is recorded as an answer, not run as a check.

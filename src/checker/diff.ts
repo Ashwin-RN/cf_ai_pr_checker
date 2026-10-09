@@ -11,7 +11,8 @@ import type {
 
 type Previous = PreviousRun["findings"][number];
 
-// Whether this run looked again at where a previous finding came from: its
+// Whether this run looked again at where a previous finding came from: the
+// line it quoted, shown to the model again or gone from the file; else its
 // file, checked fully enough for its rule; the cross-file step, for its
 // rule; or the description comparison. Only then can its absence mean it is
 // resolved.
@@ -19,7 +20,8 @@ export function assessedBy(
   rules: Rule[],
   files: FileCheck[],
   crossFile: CrossFileVerdict[],
-  intent: Intent
+  intent: Intent,
+  strict = false
 ): (f: Previous) => boolean {
   const byPath = new Map(files.map((f) => [f.path, f]));
   return (f) => {
@@ -27,10 +29,12 @@ export function assessedBy(
     if (f.path === ACROSS_FILES)
       return crossFile.some((c) => c.rule === f.rule);
     const file = byPath.get(f.path);
-    if (!file) return false;
+    if (!file || file.state !== "checked") return false;
+    const seen = file.seen[f.key];
+    if (seen !== undefined) return seen;
     const rule =
       f.rule === null ? null : (rules.find((r) => r.id === f.rule) ?? null);
-    return covers(file, rule);
+    return covers(file, rule, strict);
   };
 }
 

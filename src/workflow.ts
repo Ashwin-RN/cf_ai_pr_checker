@@ -157,7 +157,8 @@ export class CheckWorkflow extends AgentWorkflow<
               fetched.pr,
               file,
               counted.callJson,
-              deps
+              deps,
+              input.previous ?? null
             );
             await this.agent.saveWorkflowFile(input.id, result);
             return { file: { ...result, raw: null }, calls: counted.calls() };

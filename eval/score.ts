@@ -86,32 +86,31 @@ export function score(
       row.broken.push(`rule ${id} is missing from the answer`);
       continue;
     }
+    if (!same(got.status, want)) {
+      row.wrong.push(
+        `${id}: ${got.status}${got.blocking ? "" : got.status === "FAIL" ? " (pre-existing)" : ""} not ${want}`
+      );
+      if (
+        (want === "FAIL" || want === "UNSURE") &&
+        (got.status === "PASS" || got.status === "NA")
+      ) {
+        row.falsePass++;
+      } else if ((want === "PASS" || want === "NA") && got.status === "FAIL") {
+        row.falseFail++;
+      } else if (want === "FAIL" && got.status === "UNSURE") {
+        row.missed++;
+      }
+    }
+    // The policy is scored on its own, whatever the verdict: a rule that
+    // should block and does not lets the pull request through, even when
+    // it came back UNSURE rather than PASS.
     const blockingWant = c.blocking?.[id];
-    const blockingOk =
-      blockingWant === undefined || got.blocking === blockingWant;
-    if (same(got.status, want)) {
-      if (blockingOk) continue;
-      // The verdict is right and the policy is not. A rule that should
-      // block and does not lets the pull request through.
+    if (blockingWant !== undefined && got.blocking !== blockingWant) {
       row.wrong.push(
         `${id}: ${blockingWant ? "does not block but should" : "blocks but should not"}`
       );
       if (blockingWant) row.falsePass++;
       else row.falseFail++;
-      continue;
-    }
-    row.wrong.push(
-      `${id}: ${got.status}${got.blocking ? "" : got.status === "FAIL" ? " (pre-existing)" : ""} not ${want}`
-    );
-    if (
-      (want === "FAIL" || want === "UNSURE") &&
-      (got.status === "PASS" || got.status === "NA")
-    ) {
-      row.falsePass++;
-    } else if ((want === "PASS" || want === "NA") && got.status === "FAIL") {
-      row.falseFail++;
-    } else if (want === "FAIL" && got.status === "UNSURE") {
-      row.missed++;
     }
   }
   // The status is what CI reads, so it is scored in its own right: a check

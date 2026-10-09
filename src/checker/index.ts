@@ -3,6 +3,7 @@ import { GithubError, fetchPr, fetchRawFile, parsePrUrl } from "./github";
 import { checkIntent } from "./intent";
 import { limits } from "./limits";
 import {
+  applyAttestations,
   buildFindings,
   gateCrossFile,
   overallStatus,
@@ -20,6 +21,7 @@ import { ruleApplies } from "./rules";
 import { MORE_FILES, selectFiles } from "./select";
 import { collectFacts, factsCut, settleCrossFile } from "./settle";
 import type {
+  Attestation,
   CheckResult,
   CrossFileVerdict,
   FileCheck,
@@ -56,6 +58,8 @@ export type CheckInput = {
   strict?: boolean;
   runner?: Runner;
   previous?: PreviousRun | null;
+  // Questions answered on earlier checks of the same pull request.
+  attestations?: Attestation[] | null;
 };
 
 export type CheckDeps = {
@@ -160,8 +164,10 @@ function verdictFrom(
   };
 }
 
-// The model answered without a verdict for this rule. Silence is not a pass.
-function noVerdict(rule: Rule, path: string): FileVerdict {
+// The model answered without a verdict for this rule. Silence is not a pass,
+// and a file checked in parts needs a verdict from every part.
+function noVerdict(rule: Rule, path: string, part: string | null): FileVerdict {
+  const where = part ? ` in ${part}` : "";
   return {
     rule: rule.id,
     verdict: "UNSURE",
@@ -169,13 +175,21 @@ function noVerdict(rule: Rule, path: string): FileVerdict {
     line: null,
     verified: true,
     origin: null,
-    reason: "the model returned no verdict for this rule",
+    reason: `the model returned no verdict for this rule${where}`,
     why: "",
     steps: [],
     resolution: null,
-    question: `Does ${path} meet rule ${rule.id}? The check returned no verdict for it.`,
+    question: `Does ${path} meet rule ${rule.id}? The check returned no verdict for it${where}.`,
     note: null
   };
+}
+
+// A finding of the last check on this path, by key, with the line it quoted.
+export type Earlier = { key: string; quote: string | null };
+
+function present(quote: string, lines: HunkLine[]): boolean {
+  const hit = findQuote(quote, lines);
+  return hit !== null && hit.kind !== "del";
 }
 
 // Runs the model on one file, in parts when it is big, and turns the answers
@@ -186,7 +200,8 @@ export async function checkFile(
   allPaths: Set<string>,
   callJson: JsonCaller,
   content: string | null,
-  contentNote: string | null = null
+  contentNote: string | null = null,
+  earlier: Earlier[] = []
 ): Promise<FileCheck> {
   const active = rules.filter((r) => ruleApplies(r, file.path));
   const outOfScope: FileVerdict[] = rules
@@ -211,6 +226,7 @@ export async function checkFile(
     purpose: "",
     facts: [] as string[],
     warnings: [] as FileCheck["warnings"],
+    seen: {} as Record<string, boolean>,
     raw: null as string | null
   };
   if (active.length === 0) {
@@ -227,7 +243,8 @@ export async function checkFile(
       ? parseHunks(file.patch ?? "")
       : fileLines(content, file.patch ?? "");
   const { chunks, cut, windowed } = chunkLines(lines);
-  const outputs: Array<{ out: FileOutput; lines: HunkLine[] }> = [];
+  const outputs: Array<{ out: FileOutput; lines: HunkLine[]; part: number }> =
+    [];
   const raws: string[] = [];
   let lastError: string | null = null;
   for (const [i, chunk] of chunks.entries()) {
@@ -250,7 +267,7 @@ export async function checkFile(
       lastError = result.error;
       continue;
     }
-    outputs.push({ out: result.value, lines: chunk });
+    outputs.push({ out: result.value, lines: chunk, part: i });
   }
   const raw = raws.length ? raws.join("\n---\n") : null;
   if (outputs.length === 0) {
@@ -266,19 +283,34 @@ export async function checkFile(
   }
   const verdicts: FileVerdict[] = [...outOfScope];
   for (const rule of active) {
-    const candidates = outputs.flatMap(({ out, lines: shown }) => {
+    // One candidate per part; a part that stayed silent on the rule is an
+    // open question, which outranks a PASS from another part.
+    const candidates = outputs.map(({ out, lines: shown, part }) => {
       const v = out.verdicts.find((x) => x.rule === rule.id);
-      return v ? [verdictFrom(rule, v, shown, allPaths, file.path)] : [];
+      return v
+        ? verdictFrom(rule, v, shown, allPaths, file.path)
+        : noVerdict(
+            rule,
+            file.path,
+            chunks.length > 1 ? `part ${part + 1} of ${chunks.length}` : null
+          );
     });
-    verdicts.push(
-      candidates.length
-        ? candidates.sort((a, b) => rank(b) - rank(a))[0]
-        : noVerdict(rule, file.path)
-    );
+    verdicts.push(candidates.sort((a, b) => rank(b) - rank(a))[0]);
   }
   await secondLook(active, file, lines, verdicts, callJson);
   const shown = new Set(lines.map((l) => l.line));
   const failed = chunks.length - outputs.length;
+  // Which earlier findings this check reached: the quoted line was in a part
+  // the model answered on, or it is no longer in the file at all. A line
+  // still in the file but in no answered part was not looked at again.
+  const answered = outputs.flatMap((o) => o.lines);
+  const seen: Record<string, boolean> = {};
+  for (const e of earlier) {
+    if (!e.quote) continue;
+    seen[e.key] =
+      present(e.quote, answered) ||
+      (content !== null && !present(e.quote, lines));
+  }
   const reasons = [
     contentNote,
     cut ? "cut at the size cap" : null,
@@ -316,6 +348,7 @@ export async function checkFile(
           lines
         )
       })),
+    seen,
     raw
   };
 }
@@ -424,17 +457,30 @@ export async function resolveRuleSet(
 
 // Stage 2, once per file: its content at the head commit, then the check.
 // Only the file's own patch is read from the pull request, so the file list
-// can travel without diffs.
+// can travel without diffs. The last run's findings on the path let the
+// check say which of them it reached.
 export async function fileStage(
   rules: Rule[],
   pr: Pr,
   file: PrFile,
   callJson: JsonCaller,
-  deps: CheckDeps
+  deps: CheckDeps,
+  previous: PreviousRun | null = null
 ): Promise<FileCheck> {
   const allPaths = new Set(pr.files.map((f) => f.path));
   const content = await loadContent(pr, file, deps);
-  return checkFile(rules, file, allPaths, callJson, content.text, content.note);
+  const earlier = (previous?.findings ?? [])
+    .filter((f) => f.path === file.path)
+    .map((f) => ({ key: f.key, quote: f.quote }));
+  return checkFile(
+    rules,
+    file,
+    allPaths,
+    callJson,
+    content.text,
+    content.note,
+    earlier
+  );
 }
 
 // Stage 3: rules that span files, and the description against the facts.
@@ -475,20 +521,23 @@ export function assemble(a: Assembly): CheckResult {
     crossFile,
     results,
     notChecked,
-    factsCut(pr, results)
+    factsCut(pr, results),
+    strict
   );
-  const statuses = ruleStatuses(
-    ruleSet.rules,
-    results,
-    notChecked,
-    gated,
+  // Answers settle questions after the merge and before the diff, so an
+  // answered finding keeps its key and the diff sees it as the same item.
+  const { statuses, findings } = applyAttestations(
+    ruleStatuses(ruleSet.rules, results, notChecked, gated, strict),
+    buildFindings(ruleSet.rules, results, gated, intent),
+    input.attestations ?? [],
+    ruleSet.hash,
     strict
   );
   const diffed = diffRun(
     input.previous ?? null,
-    buildFindings(ruleSet.rules, results, gated, intent),
+    findings,
     ruleSet.hash,
-    assessedBy(ruleSet.rules, results, gated, intent)
+    assessedBy(ruleSet.rules, results, gated, intent, strict)
   );
   return {
     schemaVersion: 2,
@@ -590,7 +639,8 @@ export async function runCheck(
         pr,
         file,
         counted.callJson,
-        deps
+        deps,
+        input.previous ?? null
       );
       files[i].state = result.state === "checked" ? "checked" : "failed";
       deps.onFile?.(result);

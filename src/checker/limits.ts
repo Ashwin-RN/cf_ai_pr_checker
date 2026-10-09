@@ -38,6 +38,10 @@ export const limits = {
   // stored row while waiting.
   checkWaitMs: 15 * 60_000,
   checkPollMs: 2_000,
+  // An answer to a question is stored as given, up to this length, and
+  // shown in the rule table cut to the preview length.
+  answerChars: 1_000,
+  answerPreviewChars: 80,
   skipPaths: [
     /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock)$/,
     /\.min\.(js|css)$/,

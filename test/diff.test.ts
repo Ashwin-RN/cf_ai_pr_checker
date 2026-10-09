@@ -25,7 +25,8 @@ const finding = (id: string, key: string): Finding => ({
   steps: [],
   resolution: null,
   question: null,
-  note: null
+  note: null,
+  attestation: null
 });
 
 const previous: PreviousRun = {
@@ -39,6 +40,8 @@ const previous: PreviousRun = {
       kind: "blocking",
       rule: 1,
       path: "src/a.ts",
+      line: 3,
+      quote: "console.log(x)",
       summary: "s"
     },
     {
@@ -47,6 +50,8 @@ const previous: PreviousRun = {
       kind: "question",
       rule: 2,
       path: "src/b.ts",
+      line: null,
+      quote: null,
       summary: "s"
     },
     {
@@ -55,6 +60,8 @@ const previous: PreviousRun = {
       kind: "question",
       rule: 2,
       path: "src/c.ts",
+      line: null,
+      quote: null,
       summary: "s"
     }
   ]
@@ -119,14 +126,48 @@ describe("assessedBy", () => {
     ruleId: number | null,
     files: FileCheck[],
     crossFile: CrossFileVerdict[] = [],
-    compared = intent
+    compared = intent,
+    key = "k",
+    strict = false
   ) =>
     assessedBy(
       rules,
       files,
       crossFile,
-      compared
-    )({ id: "x", key: "k", kind: "question", rule: ruleId, path, summary: "" });
+      compared,
+      strict
+    )({
+      id: "x",
+      key,
+      kind: "question",
+      rule: ruleId,
+      path,
+      line: null,
+      quote: null,
+      summary: ""
+    });
+
+  it("trusts the file's own record of which earlier lines it reached", () => {
+    const windowed = [
+      file("src/a.ts", [], {
+        coverage: "changes",
+        seen: { reached: true, missed: false }
+      })
+    ];
+    expect(was("src/a.ts", 1, windowed, [], intent, "missed")).toBe(false);
+    expect(was("src/a.ts", 1, windowed, [], intent, "reached")).toBe(true);
+    // Without a record the rule decides, and under strict a windowed file
+    // settles nothing it did not reach.
+    expect(was("src/a.ts", 1, windowed, [], intent, "other")).toBe(true);
+    expect(was("src/a.ts", 1, windowed, [], intent, "other", true)).toBe(false);
+    expect(was("src/a.ts", 1, windowed, [], intent, "reached", true)).toBe(
+      true
+    );
+    const failed = [
+      file("src/a.ts", [], { state: "failed", seen: { k: true } })
+    ];
+    expect(was("src/a.ts", 1, failed)).toBe(false);
+  });
 
   it("needs the file checked fully enough for the finding's rule", () => {
     expect(was("src/a.ts", 1, [file("src/a.ts", [])])).toBe(true);

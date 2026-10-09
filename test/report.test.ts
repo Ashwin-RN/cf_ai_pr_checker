@@ -18,7 +18,8 @@ const finding: Finding = {
   steps: ["Remove the call.", "Run the tests."],
   resolution: "No console.log in src/a.ts.",
   question: null,
-  note: null
+  note: null,
+  attestation: null
 };
 
 describe("renderReport", () => {
@@ -52,6 +53,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: true,
             complete: true,
+            attested: false,
             detail: "fails in src/a.ts:3"
           },
           {
@@ -59,6 +61,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: "passes in 1 file"
           }
         ],
@@ -113,6 +116,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: false,
             complete: true,
+            attested: false,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -121,6 +125,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: "passes in 1 file"
           }
         ]
@@ -133,6 +138,72 @@ describe("renderReport", () => {
     expect(md).toContain(
       "**PASS.** No rule fails on lines this pull request adds. 1 rule fails only on lines it does not change (see Blocking)."
     );
+  });
+
+  it("still counts an unchanged-line failure when its rule reads UNSURE", () => {
+    const md = renderReport(
+      result({
+        status: "unsure",
+        findings: [
+          { ...finding, origin: "pre-existing" },
+          {
+            ...finding,
+            id: "Q1",
+            key: "cafebabe",
+            kind: "question",
+            path: "src/b.ts",
+            origin: null,
+            question: "Does src/b.ts contain this: console.log(y)?"
+          }
+        ],
+        ruleStatuses: [
+          {
+            rule: 1,
+            status: "UNSURE",
+            blocking: false,
+            complete: true,
+            attested: false,
+            detail:
+              "possible fail in src/b.ts, quote not verified; also fails in src/a.ts:3 on a line this pull request does not change"
+          },
+          {
+            rule: 2,
+            status: "PASS",
+            blocking: false,
+            complete: true,
+            attested: false,
+            detail: ""
+          }
+        ]
+      }),
+      { json: false }
+    );
+    expect(md).toContain(
+      "**UNSURE.** No rule fails on lines this pull request adds, but 1 of 2 needs an answer or more coverage. 1 rule fails only on lines it does not change (see Blocking)."
+    );
+    expect(md).toContain("| 1 | No console.log | UNSURE |");
+    // A rule with a failure on an added line is not "only" unchanged lines.
+    const mixed = renderReport(
+      result({
+        status: "fail",
+        findings: [
+          { ...finding, origin: "pre-existing" },
+          { ...finding, id: "F2", key: "cafebabe", path: "src/b.ts" }
+        ],
+        ruleStatuses: [
+          {
+            rule: 1,
+            status: "FAIL",
+            blocking: true,
+            complete: true,
+            attested: false,
+            detail: ""
+          }
+        ]
+      }),
+      { json: false }
+    );
+    expect(mixed).not.toContain("only on lines it does not change");
   });
 
   it("says what changed since the last check", () => {
@@ -149,6 +220,7 @@ describe("renderReport", () => {
             status: "FAIL",
             blocking: true,
             complete: true,
+            attested: false,
             detail: ""
           },
           {
@@ -156,6 +228,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: ""
           }
         ],
@@ -172,6 +245,8 @@ describe("renderReport", () => {
               kind: "question",
               rule: 2,
               path: "src/b.ts",
+              line: null,
+              quote: null,
               summary: "s"
             }
           ],
@@ -182,6 +257,8 @@ describe("renderReport", () => {
               kind: "blocking",
               rule: 1,
               path: "src/c.ts",
+              line: 9,
+              quote: "console.log(z)",
               summary: "s"
             }
           ]
@@ -219,12 +296,14 @@ describe("renderReport", () => {
     const md = renderReport(
       result({
         status: "unsure",
+        findings: [{ ...finding, origin: "pre-existing" }],
         ruleStatuses: [
           {
             rule: 1,
             status: "FAIL",
             blocking: false,
             complete: false,
+            attested: false,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -233,6 +312,7 @@ describe("renderReport", () => {
             status: "PASS",
             blocking: false,
             complete: true,
+            attested: false,
             detail: ""
           }
         ],
@@ -257,7 +337,14 @@ describe("renderReport", () => {
     const r = result({
       rules: [rule(1, "a | b")],
       ruleStatuses: [
-        { rule: 1, status: "NA", blocking: false, complete: true, detail: "" }
+        {
+          rule: 1,
+          status: "NA",
+          blocking: false,
+          complete: true,
+          attested: false,
+          detail: ""
+        }
       ]
     });
     expect(renderReport(r, { json: false })).toContain("| 1 | a \\| b | NA |");
