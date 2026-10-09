@@ -557,9 +557,12 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   // instance restarted while the Workflow ran, still gets its report: it is
   // appended to the conversation here.
   private async deliverIfLost(workflowId: string): Promise<void> {
-    const id = checkIdOf(this.name, workflowId);
     const info = this.getWorkflow(workflowId);
-    const source = (info?.metadata as { source?: string } | undefined)?.source;
+    const meta = info?.metadata as
+      | { checkId?: string; source?: string }
+      | undefined;
+    const id = meta?.checkId ?? checkIdOf(this.name, workflowId);
+    const source = meta?.source;
     if (source === "chat" && !this.delivered.has(id)) {
       const state = this.store.checkState(id);
       const text = state?.result

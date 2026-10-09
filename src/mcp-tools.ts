@@ -149,7 +149,7 @@ export function registerTools(
           .regex(/^[0-9a-z][0-9a-z-]{7,63}$/i)
           .optional()
           .describe(
-            "Your own id for this check, so get_check can find it if this call is cut off. One is generated otherwise."
+            "Your own id for this check, unique within the workspace, so get_check can find it if this call is cut off. One is generated otherwise."
           ),
         rules: z
           .array(z.string())
