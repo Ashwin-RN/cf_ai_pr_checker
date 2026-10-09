@@ -28,7 +28,7 @@ across runs, so an item that is still open is the same item.
 
 A report from a run against a fixture pull request that adds one file with a `console.log` call:
 
-_To fill in: a report from a real run._
+A full sample report from a run with a fresh Workers AI budget is still to be added here; the shape is described under "The report" below.
 
 ## How it meets the assignment
 
@@ -102,7 +102,7 @@ CHECKER_URL=http://localhost:5173 API_TOKEN=dev-token npm run eval
 
 It prints one row per case and exits non-zero on any false PASS, a rule that should have failed or needed an answer but came back PASS.
 
-_To fill in: the results table._
+The results table is still to be added: the first full run against the fixtures is waiting on a day of Workers AI budget, which one run uses up.
 
 ## Run it locally
 
