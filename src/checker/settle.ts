@@ -24,6 +24,17 @@ export function collectFacts(pr: Pr, files: FileCheck[]): Fact[] {
   return out;
 }
 
+// Whether the fact list was cut at its cap, so the settle step did not see
+// everything the files reported.
+export function factsCut(pr: Pr, files: FileCheck[]): boolean {
+  const wanted =
+    pr.files.length +
+    files
+      .filter((f) => f.state === "checked")
+      .reduce((n, f) => n + f.facts.length, 0);
+  return wanted > limits.factsPerSettle;
+}
+
 // One call over the facts for the rules no single file can settle. A verdict
 // stands only on facts that exist.
 export async function settleCrossFile(
@@ -36,15 +47,22 @@ export async function settleCrossFile(
   const crossFile = rules.filter((r) => r.scope === "cross_file");
   const checked = files.filter((f) => f.state === "checked");
   if (!crossFile.length || !checked.length) return [];
+  // What each file said about these rules from its own side: a question it
+  // could not settle alone, or a fail it saw without the other files.
   const open = checked.flatMap((f) =>
     f.verdicts
       .filter(
-        (v) => v.verdict === "UNSURE" && crossFile.some((r) => r.id === v.rule)
+        (v) =>
+          (v.verdict === "UNSURE" || v.verdict === "FAIL") &&
+          crossFile.some((r) => r.id === v.rule)
       )
       .map((v) => ({
         rule: v.rule,
         path: f.path,
-        question: v.question ?? v.reason
+        question:
+          v.verdict === "FAIL"
+            ? `possible fail: ${v.reason}`
+            : (v.question ?? v.reason)
       }))
   );
   const result = await callJson(

@@ -74,7 +74,9 @@ export type FileWarning = {
 export type FileCheck = {
   path: string;
   state: "checked" | "failed";
-  coverage: "full" | "partial";
+  // How much of the file the model saw: all of it, the windows around its
+  // changes, or less than that (the diff alone, a cut, a failed part).
+  coverage: "full" | "changes" | "partial";
   reason: string | null;
   chunks: number;
   purpose: string;
@@ -126,10 +128,13 @@ export type Finding = {
   note: string | null;
 };
 
+// `complete` is false when a file in the rule's scope was not covered for
+// it, whatever the status says.
 export type RuleStatus = {
   rule: number;
   status: Verdict;
   blocking: boolean;
+  complete: boolean;
   detail: string;
 };
 export type CheckStatus = "pass" | "fail" | "unsure";
@@ -145,6 +150,7 @@ export type PreviousRun = {
     id: string;
     key: string;
     kind: FindingKind;
+    rule: number | null;
     path: string;
     summary: string;
   }>;
@@ -157,6 +163,9 @@ export type RunDiff = {
   new: number;
   open: number;
   resolved: PreviousRun["findings"];
+  // Previous findings whose file or step this run did not check again, so
+  // their absence says nothing.
+  unassessed: PreviousRun["findings"];
 };
 
 export type CheckResult = {

@@ -136,6 +136,7 @@ describe("checkFile", () => {
     const result = await checkFile([must], file, paths, call, content);
     expect(result.verdicts[0]).toMatchObject({
       verified: false,
+      note: "no line was quoted",
       origin: null,
       steps: [],
       why: "",
@@ -188,12 +189,51 @@ describe("checkFile", () => {
     expect(prompts[0][1].content.length).toBeLessThan(
       limits.charsPerModelCall + 2_000
     );
-    expect(result).toMatchObject({ chunks: 2, coverage: "full" });
+    expect(result).toMatchObject({ chunks: 2, coverage: "changes" });
     expect(result.verdicts[0]).toMatchObject({
       verdict: "FAIL",
       verified: true,
       line: 1401,
       origin: "introduced"
+    });
+  });
+
+  it("prompts a single window as a part and counts the file as checked for its changes", async () => {
+    const line = (i: number) => `const v${i} = ${"x".repeat(60)};`;
+    const rows = Array.from({ length: 1500 }, (_, i) => line(i));
+    rows[100] = "console.log(early);";
+    const big = rows.join("\n") + "\n";
+    const patch = [
+      "@@ -101,1 +101,1 @@",
+      `-${line(100)}`,
+      "+console.log(early);"
+    ].join("\n");
+    const bigFile: PrFile = { ...file, patch, additions: 1, deletions: 1 };
+    const { call, prompts } = caller(output([v(1, "PASS")]));
+    const result = await checkFile([rule(1)], bigFile, paths, call, big);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0][1].content).toContain("Part 1 of 1 of the file follows");
+    expect(prompts[0][1].content).not.toContain("The whole file follows.");
+    expect(result).toMatchObject({
+      chunks: 1,
+      coverage: "changes",
+      reason: null
+    });
+  });
+
+  it("returns UNSURE for a rule the model left out, not nothing", async () => {
+    const rules = [rule(1, "No console.log"), rule(2, "No TODO")];
+    const { call } = caller(output([v(1, "PASS")]));
+    const result = await checkFile(rules, file, paths, call, content);
+    expect(result.verdicts.map((x) => [x.rule, x.verdict])).toEqual([
+      [1, "PASS"],
+      [2, "UNSURE"]
+    ]);
+    expect(result.verdicts[1]).toMatchObject({
+      verified: true,
+      reason: "the model returned no verdict for this rule",
+      question:
+        "Does src/a.ts meet rule 2? The check returned no verdict for it."
     });
   });
 

@@ -169,3 +169,19 @@ The Workers AI cap from the day before had not lifted at 03:00 UTC despite the d
 - The model call that interprets the rules happens before the stages and was not counted; the count now travels on the rule set, so a check that interpreted its rules reports one call more than one that read them from the cache.
 - `--only` that matches no case is an error, not a green run over nothing.
 - The README says that a deployment upgraded across the name-space change starts its API workspaces empty, and that pull requests from forks are not checked, since secrets are not available to them.
+
+## 2026-10-09: Trust, part two: the verdicts
+
+**Prompt:**
+
+> start PR B
+
+**What came out of it:** the branch `trust-verdicts`, which changes how a verdict is decided so that a PASS means the evidence was seen.
+
+- A PASS claimed without a quote the file contains is UNSURE and a question, like an unverified FAIL. A rule the model returned no verdict for is UNSURE for that file; silence is not a pass.
+- Every rule status says whether its coverage is complete, and the check is UNSURE on any gap, so a pre-existing failure beside a file over the cap no longer reads as pass.
+- A rule that spans files takes its verdict from the cross-file step. A file's own verdict on such a rule is one of that step's inputs, a FAIL included, and never decides alone; without the step the rule is UNSURE. A cross-file FAIL stands only when every file the rule needed was checked and no file's facts were cut short; otherwise it is a question that says so.
+- A path hint is kept only when the rule names every directory on it, so an invented parent directory no longer narrows a rule.
+- A file checked in windows is prompted as parts even when there is one window, and counts as checked for its change: complete for a "must not" rule and a rule that spans files, a gap for a per-file "must" rule.
+- Finding keys no longer include the kind, so a FAIL that becomes a question keeps its key. A previous finding whose file or step was not checked again is listed as not assessed rather than resolved. Cross-file findings sit at `(across files)`.
+- The README says what the cross-file step rests on and what a windowed file does and does not cover.

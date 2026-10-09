@@ -93,10 +93,16 @@ export function renderHunks(
   return { text: rows.join("\n"), truncated: false };
 }
 
-export type Chunking = { chunks: HunkLine[][]; cut: boolean };
+export type Chunking = {
+  chunks: HunkLine[][];
+  cut: boolean;
+  windowed: boolean;
+};
 
 // A file that fits goes in one piece. A bigger one is cut into windows around
 // its changes, each with context either side. Windows that touch are merged.
+// `windowed` says the model will not see the whole file, even when one window
+// holds every change.
 export function chunkLines(
   lines: HunkLine[],
   maxChars: number = limits.charsPerModelCall,
@@ -104,7 +110,7 @@ export function chunkLines(
   maxChunks: number = limits.chunksPerFile
 ): Chunking {
   if (!renderHunks(lines, maxChars).truncated) {
-    return { chunks: [lines], cut: false };
+    return { chunks: [lines], cut: false, windowed: false };
   }
   const windows: Array<[number, number]> = [];
   lines.forEach((l, i) => {
@@ -121,7 +127,7 @@ export function chunkLines(
   const cut =
     windows.length > maxChunks ||
     chunks.some((c) => renderHunks(c, maxChars).truncated);
-  return { chunks, cut };
+  return { chunks, cut, windowed: true };
 }
 
 export function normalise(s: string): string {

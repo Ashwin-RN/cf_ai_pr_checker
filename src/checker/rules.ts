@@ -62,8 +62,9 @@ export function defaultRules(texts: string[]): Rule[] {
 }
 
 // The model's path hints become directory prefixes, kept only when the rule
-// text names the directory (singular or plural). A prefix is never narrower
-// than the hint, so a bad hint cannot hide files from a rule.
+// text names every directory on the path (singular or plural). A hint the
+// rule does not name is dropped, and the rule then applies everywhere: a bad
+// hint can widen a rule, never narrow it to a directory the rule did not name.
 export function scopeFrom(hints: string[], text: string): string[] | null {
   const out = new Set<string>();
   for (const hint of hints) {
@@ -71,16 +72,20 @@ export function scopeFrom(hints: string[], text: string): string[] | null {
     const cut = literal.lastIndexOf("/");
     if (cut === -1) continue;
     const prefix = literal.slice(0, cut + 1).replace(/\/+/g, "/");
-    const dir = prefix.split("/").filter(Boolean).at(-1) ?? "";
-    const stem = dir
-      .replace(/^\./, "")
-      .replace(/s$/i, "")
-      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (stem && new RegExp(`(^|[^\\w])${stem}s?(?!\\w)`, "i").test(text)) {
-      out.add(prefix);
-    }
+    const dirs = prefix.split("/").filter(Boolean);
+    if (dirs.length && dirs.every((dir) => named(dir, text))) out.add(prefix);
   }
   return out.size ? [...out] : null;
+}
+
+function named(dir: string, text: string): boolean {
+  const stem = dir
+    .replace(/^\./, "")
+    .replace(/s$/i, "")
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (
+    stem.length > 0 && new RegExp(`(^|[^\\w])${stem}s?(?!\\w)`, "i").test(text)
+  );
 }
 
 export function ruleApplies(rule: Rule, path: string): boolean {

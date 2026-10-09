@@ -51,12 +51,14 @@ describe("renderReport", () => {
             rule: 1,
             status: "FAIL",
             blocking: true,
+            complete: true,
             detail: "fails in src/a.ts:3"
           },
           {
             rule: 2,
             status: "PASS",
             blocking: false,
+            complete: true,
             detail: "passes in 1 file"
           }
         ],
@@ -110,6 +112,7 @@ describe("renderReport", () => {
             rule: 1,
             status: "FAIL",
             blocking: false,
+            complete: true,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -117,6 +120,7 @@ describe("renderReport", () => {
             rule: 2,
             status: "PASS",
             blocking: false,
+            complete: true,
             detail: "passes in 1 file"
           }
         ]
@@ -140,8 +144,20 @@ describe("renderReport", () => {
           { ...finding, id: "F2", key: "cafebabe", change: "new" }
         ],
         ruleStatuses: [
-          { rule: 1, status: "FAIL", blocking: true, detail: "" },
-          { rule: 2, status: "PASS", blocking: false, detail: "" }
+          {
+            rule: 1,
+            status: "FAIL",
+            blocking: true,
+            complete: true,
+            detail: ""
+          },
+          {
+            rule: 2,
+            status: "PASS",
+            blocking: false,
+            complete: true,
+            detail: ""
+          }
         ],
         previous: {
           checkId: "check-0",
@@ -154,7 +170,18 @@ describe("renderReport", () => {
               id: "Q1",
               key: "feedface",
               kind: "question",
+              rule: 2,
               path: "src/b.ts",
+              summary: "s"
+            }
+          ],
+          unassessed: [
+            {
+              id: "F3",
+              key: "0badf00d",
+              kind: "blocking",
+              rule: 1,
+              path: "src/c.ts",
               summary: "s"
             }
           ]
@@ -163,7 +190,7 @@ describe("renderReport", () => {
       { json: false }
     );
     expect(md).toContain(
-      "Since the last check at `0123456`: 1 new, 1 still open, 1 resolved (Q1 `feedface` src/b.ts). The rules changed since then."
+      "Since the last check at `0123456`: 1 new, 1 still open, 1 resolved (Q1 `feedface` src/b.ts), 1 not assessed (F3 `0badf00d` src/c.ts; not checked again this run). The rules changed since then."
     );
     expect(md).toContain("key deadbeef · still open\n");
     expect(md).toContain("key cafebabe · new\n");
@@ -188,10 +215,50 @@ describe("renderReport", () => {
     );
   });
 
+  it("lists a windowed file and counts a coverage gap in the status line", () => {
+    const md = renderReport(
+      result({
+        status: "unsure",
+        ruleStatuses: [
+          {
+            rule: 1,
+            status: "FAIL",
+            blocking: false,
+            complete: false,
+            detail:
+              "fails in src/a.ts:3 on a line this pull request does not change"
+          },
+          {
+            rule: 2,
+            status: "PASS",
+            blocking: false,
+            complete: true,
+            detail: ""
+          }
+        ],
+        files: [file("src/w.ts", [], { coverage: "changes", chunks: 3 })]
+      }),
+      { json: true }
+    );
+    expect(md).toContain(
+      "**UNSURE.** No rule fails on lines this pull request adds, but 1 of 2 needs an answer or more coverage. 1 rule fails only on lines it does not change (see Blocking)."
+    );
+    expect(md).toContain(
+      "- `src/w.ts`: checked around its changes in 3 parts; the rest of the file was not shown"
+    );
+    const parsed = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(md)![1]);
+    expect(parsed.rules.map((r: { complete: boolean }) => r.complete)).toEqual([
+      false,
+      true
+    ]);
+  });
+
   it("escapes pipes in rule text", () => {
     const r = result({
       rules: [rule(1, "a | b")],
-      ruleStatuses: [{ rule: 1, status: "NA", blocking: false, detail: "" }]
+      ruleStatuses: [
+        { rule: 1, status: "NA", blocking: false, complete: true, detail: "" }
+      ]
     });
     expect(renderReport(r, { json: false })).toContain("| 1 | a \\| b | NA |");
   });

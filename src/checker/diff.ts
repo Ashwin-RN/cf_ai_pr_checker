@@ -1,11 +1,48 @@
-import type { Finding, PreviousRun, RunDiff } from "./types";
+import { ACROSS_FILES, DESCRIPTION, covers } from "./merge";
+import type {
+  CrossFileVerdict,
+  FileCheck,
+  Finding,
+  Intent,
+  PreviousRun,
+  Rule,
+  RunDiff
+} from "./types";
 
-// Keys stay stable across runs, so a finding is new, still open, or resolved
-// by comparing keys with the last finished check of the same pull request.
+type Previous = PreviousRun["findings"][number];
+
+// Whether this run looked again at where a previous finding came from: its
+// file, checked fully enough for its rule; the cross-file step, for its
+// rule; or the description comparison. Only then can its absence mean it is
+// resolved.
+export function assessedBy(
+  rules: Rule[],
+  files: FileCheck[],
+  crossFile: CrossFileVerdict[],
+  intent: Intent
+): (f: Previous) => boolean {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  return (f) => {
+    if (f.path === DESCRIPTION) return intent.compared;
+    if (f.path === ACROSS_FILES)
+      return crossFile.some((c) => c.rule === f.rule);
+    const file = byPath.get(f.path);
+    if (!file) return false;
+    const rule =
+      f.rule === null ? null : (rules.find((r) => r.id === f.rule) ?? null);
+    return covers(file, rule);
+  };
+}
+
+// Keys stay stable across runs, so a finding is new, still open, resolved or
+// not assessed by comparing keys with the last finished check of the same
+// pull request. A previous finding is resolved only when its key is absent
+// and this run assessed where it came from.
 export function diffRun(
   previous: PreviousRun | null,
   findings: Finding[],
-  rulesHash: string
+  rulesHash: string,
+  assessed: (f: Previous) => boolean
 ): { findings: Finding[]; previous: RunDiff | null } {
   if (!previous) {
     return {
@@ -18,6 +55,7 @@ export function diffRun(
   const marked = findings.map(
     (f): Finding => ({ ...f, change: before.has(f.key) ? "open" : "new" })
   );
+  const gone = previous.findings.filter((f) => !now.has(f.key));
   return {
     findings: marked,
     previous: {
@@ -26,7 +64,8 @@ export function diffRun(
       rulesChanged: previous.rulesHash !== rulesHash,
       new: marked.filter((f) => f.change === "new").length,
       open: marked.filter((f) => f.change === "open").length,
-      resolved: previous.findings.filter((f) => !now.has(f.key))
+      resolved: gone.filter(assessed),
+      unassessed: gone.filter((f) => !assessed(f))
     }
   };
 }

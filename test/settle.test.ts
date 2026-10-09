@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { limits } from "../src/checker/limits";
 import type { ChatMessage, JsonCaller } from "../src/checker/model";
-import { collectFacts, settleCrossFile } from "../src/checker/settle";
+import { collectFacts, factsCut, settleCrossFile } from "../src/checker/settle";
 import type { Pr, Rule } from "../src/checker/types";
 import { file, rule, verdict } from "./fixtures";
 
@@ -47,7 +48,8 @@ const files = [
   file("test/login.test.ts", [verdict(2, "UNSURE")], {
     facts: ["adds a test for POST /login"]
   }),
-  file("src/broken.ts", [], { state: "failed", facts: ["ignored"] })
+  file("src/broken.ts", [], { state: "failed", facts: ["ignored"] }),
+  file("src/x.ts", [verdict(2, "FAIL", { reason: "no test here" })])
 ];
 
 const crossRule: Rule = {
@@ -75,6 +77,21 @@ describe("collectFacts", () => {
         "test/login.test.ts: adds a test for POST /login"
       ]
     ]);
+  });
+});
+
+describe("factsCut", () => {
+  it("is true when the files reported more than the settle step can see", () => {
+    expect(factsCut(pr, files)).toBe(false);
+    const many = [
+      file("src/big.ts", [], {
+        facts: Array.from(
+          { length: limits.factsPerSettle },
+          (_, i) => `fact ${i}`
+        )
+      })
+    ];
+    expect(factsCut(pr, many)).toBe(true);
   });
 });
 
@@ -120,6 +137,7 @@ describe("settleCrossFile", () => {
     expect(user).toContain("[2] src/login.ts: adds route POST /login");
     expect(user).toContain("- rule 2, src/login.ts: Is login tested?");
     expect(user).toContain("- rule 2, test/login.test.ts: because");
+    expect(user).toContain("- rule 2, src/x.ts: possible fail: no test here");
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({
       rule: 2,

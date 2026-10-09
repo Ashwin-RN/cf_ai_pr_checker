@@ -5,14 +5,19 @@ import type {
   CheckStatus,
   CrossFileVerdict,
   FileCheck,
+  FileVerdict,
   Finding,
-  FindingKind,
   Intent,
   Rule,
   RuleStatus,
-  Skipped
+  Skipped,
+  Verdict
 } from "./types";
 import { normalise } from "./verify";
+
+// Where a finding sits when it is not in one file.
+export const ACROSS_FILES = "(across files)";
+export const DESCRIPTION = "(description)";
 
 // FNV-1a over the parts: short, deterministic, no async.
 export function stableKey(parts: Array<string | number | null>): string {
@@ -28,7 +33,19 @@ function at(path: string, line: number | null): string {
   return line === null ? path : `${path}:${line}`;
 }
 
-// Files a rule needed that the check did not fully cover. A rule scoped to
+// Whether a checked file settles a rule for its own path. A file checked
+// around its changes settles a prohibition and a rule that spans files, both
+// of which are about the change; a per-file requirement may be met anywhere
+// in the file, so the part not shown is a gap.
+export function covers(file: FileCheck, rule: Rule | null): boolean {
+  if (file.state !== "checked" || file.coverage === "partial") return false;
+  if (file.coverage === "full") return true;
+  return (
+    rule === null || rule.polarity === "must_not" || rule.scope === "cross_file"
+  );
+}
+
+// Files a rule needed that the check did not cover for it. A rule scoped to
 // one directory is not downgraded by gaps elsewhere.
 export function ruleGaps(
   rule: Rule,
@@ -42,12 +59,7 @@ export function ruleGaps(
     }
   }
   for (const f of files) {
-    if (
-      ruleApplies(rule, f.path) &&
-      (f.state === "failed" || f.coverage === "partial")
-    ) {
-      gaps.push(f.path);
-    }
+    if (ruleApplies(rule, f.path) && !covers(f, rule)) gaps.push(f.path);
   }
   return gaps;
 }
@@ -57,8 +69,55 @@ function listed(paths: string[]): string {
   return `${paths.slice(0, 3).join(", ")}${more}`;
 }
 
-// Per rule, across files: verified FAIL wins, then a cross-file FAIL, then
-// anything unsettled, then PASS when nothing in scope was left unchecked.
+// A cross-file verdict rests on each file's summary of itself, not on code.
+// A FAIL from it stands only when every file the rule needed was checked and
+// no summary was cut short; otherwise what the rule requires may sit in what
+// was not seen, and the fail is a question.
+export function gateCrossFile(
+  rules: Rule[],
+  crossFile: CrossFileVerdict[],
+  files: FileCheck[],
+  notChecked: Skipped[],
+  factsCut: boolean
+): CrossFileVerdict[] {
+  const capped = files
+    .filter(
+      (f) => f.state === "checked" && f.facts.length >= limits.factsPerFile
+    )
+    .map((f) => f.path);
+  return crossFile.map((c) => {
+    if (c.verdict !== "FAIL") return c;
+    const rule = rules.find((r) => r.id === c.rule);
+    const gaps = rule ? ruleGaps(rule, files, notChecked) : [];
+    const reasons = [
+      gaps.length ? `not checked: ${listed(gaps)}` : null,
+      capped.length
+        ? `more facts than could be listed for ${listed(capped)}`
+        : null,
+      factsCut ? "the fact list was cut at its cap" : null
+    ].filter((s): s is string => s !== null);
+    if (!reasons.length) return c;
+    const reason = c.reason.replace(/\.$/, "");
+    return {
+      ...c,
+      verdict: "UNSURE",
+      note: [
+        c.note,
+        `a fail across files stands only on complete facts; ${reasons.join("; ")}`
+      ]
+        .filter(Boolean)
+        .join("; "),
+      question:
+        c.question ||
+        `On the facts seen rule ${c.rule} fails (${reason}). Is what it requires in a file or a fact the check did not see?`
+    };
+  });
+}
+
+// Per rule, across files. A rule one file can decide: verified FAIL wins,
+// then anything unsettled, then PASS when nothing in scope was left
+// unchecked. A rule that spans files takes the cross-file verdict; a file's
+// own verdict on it was one of that step's inputs and never decides alone.
 export function ruleStatuses(
   rules: Rule[],
   files: FileCheck[],
@@ -70,11 +129,62 @@ export function ruleStatuses(
   return rules.map((rule) => {
     const gaps = ruleGaps(rule, files, notChecked);
     const complete = gaps.length === 0;
+    const status = (
+      s: Verdict,
+      blocking: boolean,
+      detail: string
+    ): RuleStatus => ({ rule: rule.id, status: s, blocking, complete, detail });
     const hits = checked.flatMap((f) =>
       f.verdicts
         .filter((v) => v.rule === rule.id)
         .map((v) => ({ path: f.path, v }))
     );
+    if (rule.scope === "cross_file") {
+      const settle = crossFile.find((c) => c.rule === rule.id);
+      if (settle?.verdict === "FAIL") {
+        return status("FAIL", true, `fails across files: ${settle.reason}`);
+      }
+      if (settle?.verdict === "PASS") {
+        return complete
+          ? status(
+              "PASS",
+              false,
+              `settled across files from ${settle.facts.length} fact${settle.facts.length === 1 ? "" : "s"}`
+            )
+          : status(
+              "UNSURE",
+              false,
+              `passes across the checked files; not checked: ${listed(gaps)}`
+            );
+      }
+      if (settle?.verdict === "UNSURE") {
+        return status(
+          "UNSURE",
+          false,
+          `needs an answer across files: ${settle.question ?? settle.reason}`
+        );
+      }
+      if (settle?.verdict === "NA") {
+        return complete
+          ? status("NA", false, "not triggered by this PR")
+          : status(
+              "UNSURE",
+              false,
+              `not triggered by the checked files; not checked: ${listed(gaps)}`
+            );
+      }
+      if (checked.length === 0) {
+        return status("UNSURE", false, "no file could be checked");
+      }
+      const fail = hits.find((h) => h.v.verdict === "FAIL");
+      return status(
+        "UNSURE",
+        false,
+        fail
+          ? `possible fail in ${fail.path}; needs the cross-file step, which did not run`
+          : "needs the cross-file step, which did not run"
+      );
+    }
     const fails = hits.filter((h) => h.v.verdict === "FAIL" && h.v.verified);
     if (fails.length) {
       const introduced = fails.filter((h) => h.v.origin !== "pre-existing");
@@ -90,109 +200,69 @@ export function ruleStatuses(
             ? " on a line this pull request does not change"
             : ", all on lines this pull request does not change";
       }
-      return {
-        rule: rule.id,
-        status: "FAIL",
-        blocking: strict || introduced.length > 0,
-        detail
-      };
-    }
-    const settle = crossFile.find((c) => c.rule === rule.id);
-    if (settle?.verdict === "FAIL") {
-      return {
-        rule: rule.id,
-        status: "FAIL",
-        blocking: true,
-        detail: `fails across files: ${settle.reason}`
-      };
+      return status("FAIL", strict || introduced.length > 0, detail);
     }
     const unverified = hits.find(
       (h) => h.v.verdict === "FAIL" && !h.v.verified
     );
     if (unverified) {
-      return {
-        rule: rule.id,
-        status: "UNSURE",
-        blocking: false,
-        detail: `possible fail in ${unverified.path}, quote not verified`
-      };
-    }
-    if (settle?.verdict === "PASS") {
-      return complete
-        ? {
-            rule: rule.id,
-            status: "PASS",
-            blocking: false,
-            detail: `settled across files from ${settle.facts.length} fact${settle.facts.length === 1 ? "" : "s"}`
-          }
-        : {
-            rule: rule.id,
-            status: "UNSURE",
-            blocking: false,
-            detail: `passes across the checked files; not checked: ${listed(gaps)}`
-          };
+      return status(
+        "UNSURE",
+        false,
+        `possible fail in ${unverified.path}, quote not verified`
+      );
     }
     const unsure = hits.filter((h) => h.v.verdict === "UNSURE");
     if (unsure.length) {
-      return {
-        rule: rule.id,
-        status: "UNSURE",
-        blocking: false,
-        detail: `needs an answer for ${listed(unsure.map((h) => h.path))}`
-      };
+      return status(
+        "UNSURE",
+        false,
+        `needs an answer for ${listed(unsure.map((h) => h.path))}`
+      );
+    }
+    const claimed = hits.filter((h) => h.v.verdict === "PASS" && !h.v.verified);
+    if (claimed.length) {
+      return status(
+        "UNSURE",
+        false,
+        `pass claimed without a verified quote in ${listed(claimed.map((h) => h.path))}`
+      );
     }
     const passes = hits.filter((h) => h.v.verdict === "PASS").length;
     if (passes) {
       return complete
-        ? {
-            rule: rule.id,
-            status: "PASS",
-            blocking: false,
-            detail: `passes in ${passes} file${passes === 1 ? "" : "s"}`
-          }
-        : {
-            rule: rule.id,
-            status: "UNSURE",
-            blocking: false,
-            detail: `passes on the checked files; not checked: ${listed(gaps)}`
-          };
-    }
-    if (settle?.verdict === "UNSURE") {
-      return {
-        rule: rule.id,
-        status: "UNSURE",
-        blocking: false,
-        detail: `needs an answer across files: ${settle.question ?? settle.reason}`
-      };
+        ? status(
+            "PASS",
+            false,
+            `passes in ${passes} file${passes === 1 ? "" : "s"}`
+          )
+        : status(
+            "UNSURE",
+            false,
+            `passes on the checked files; not checked: ${listed(gaps)}`
+          );
     }
     if (checked.length === 0) {
-      return {
-        rule: rule.id,
-        status: "UNSURE",
-        blocking: false,
-        detail: "no file could be checked"
-      };
+      return status("UNSURE", false, "no file could be checked");
     }
     if (!complete) {
-      return {
-        rule: rule.id,
-        status: "UNSURE",
-        blocking: false,
-        detail: `not triggered by the checked files; not checked: ${listed(gaps)}`
-      };
+      return status(
+        "UNSURE",
+        false,
+        `not triggered by the checked files; not checked: ${listed(gaps)}`
+      );
     }
-    return {
-      rule: rule.id,
-      status: "NA",
-      blocking: false,
-      detail: "not triggered by this PR"
-    };
+    return status("NA", false, "not triggered by this PR");
   });
 }
 
+// Fail on a blocking rule; unsure when any rule is unsettled or has a file in
+// its scope the check did not cover; pass only when neither holds.
 export function overallStatus(statuses: RuleStatus[]): CheckStatus {
   if (statuses.some((s) => s.blocking)) return "fail";
-  if (statuses.some((s) => s.status === "UNSURE")) return "unsure";
+  if (statuses.some((s) => s.status === "UNSURE" || !s.complete)) {
+    return "unsure";
+  }
   return "pass";
 }
 
@@ -225,10 +295,58 @@ function number(drafts: Draft[], prefix: string, max = Infinity): Finding[] {
   return out;
 }
 
-const DESCRIPTION = "(description)";
+// What one file's verdict raises: a block for a verified FAIL on a rule the
+// file can decide, a question for anything claimed but not shown, nothing
+// for NA and a verified PASS. One verdict per rule per file, so the key
+// needs no kind: a FAIL that becomes a question keeps its key.
+function fileDraft(
+  rule: Rule | undefined,
+  file: FileCheck,
+  v: FileVerdict
+): Draft | null {
+  if (v.verdict === "NA" || (v.verdict === "PASS" && v.verified)) return null;
+  const spans = rule?.scope === "cross_file";
+  const blocks = v.verdict === "FAIL" && v.verified && !spans;
+  const draft: Draft = {
+    key: stableKey([v.rule, file.path, v.quote ? normalise(v.quote) : ""]),
+    kind: blocks ? "blocking" : "question",
+    rule: v.rule,
+    path: file.path,
+    line: v.line,
+    quote: v.quote,
+    origin: blocks ? v.origin : null,
+    summary: v.reason,
+    why: v.why || (rule ? `Rule ${rule.id}: ${rule.text}` : ""),
+    steps: v.steps,
+    resolution: v.resolution,
+    question: null,
+    note: v.note
+  };
+  if (blocks) return draft;
+  if (v.verdict === "FAIL" && v.verified) {
+    draft.note =
+      "possible fail; the rule spans files and the cross-file step did not run";
+    draft.question =
+      v.question ||
+      `Does another file in this pull request supply what rule ${v.rule} requires for ${file.path}?`;
+  } else if (v.verdict === "FAIL") {
+    draft.note = `possible fail; ${v.note ?? "the quote was not found in the file"}`;
+    draft.question =
+      v.question || `Does ${file.path} contain this: ${v.quote ?? v.reason}?`;
+  } else if (v.verdict === "PASS") {
+    draft.note = `possible pass; ${v.note ?? "no line was quoted"}`;
+    draft.question = v.quote
+      ? `Does ${file.path} contain this: ${v.quote}?`
+      : `Where does ${file.path} meet rule ${v.rule}? The check claimed a pass without quoting a line.`;
+  } else {
+    draft.question = v.question || `Confirm: ${v.reason}`;
+  }
+  return draft;
+}
 
-// Blocking from verified FAILs, questions from UNSURE and unverified FAILs,
-// warnings from the per-file notes and intent drift. Keys are stable across runs.
+// Blocking from verified FAILs, questions from everything claimed but not
+// shown, warnings from the per-file notes and intent drift. Keys are stable
+// across runs.
 export function buildFindings(
   rules: Rule[],
   files: FileCheck[],
@@ -238,46 +356,20 @@ export function buildFindings(
   const blocking: Draft[] = [];
   const questions: Draft[] = [];
   const warnings: Draft[] = [];
-  const settled = new Set(
-    crossFile
-      .filter((c) => c.verdict === "PASS" || c.verdict === "FAIL")
-      .map((c) => c.rule)
-  );
+  // The cross-file step answers for the rules it settled; a file's own
+  // verdict on such a rule was one of its inputs.
+  const settled = new Set(crossFile.map((c) => c.rule));
   for (const f of files) {
     if (f.state !== "checked") continue;
     for (const v of f.verdicts) {
-      if (v.verdict !== "FAIL" && v.verdict !== "UNSURE") continue;
-      const rule = rules.find((r) => r.id === v.rule);
-      const kind: FindingKind =
-        v.verdict === "FAIL" && v.verified ? "blocking" : "question";
-      if (kind === "question" && settled.has(v.rule)) continue;
-      const unverifiedFail = v.verdict === "FAIL" && !v.verified;
-      const fallbackQuestion = unverifiedFail
-        ? `Does ${f.path} contain this: ${v.quote ?? v.reason}?`
-        : `Confirm: ${v.reason}`;
-      const draft: Draft = {
-        key: stableKey([
-          kind,
-          v.rule,
-          f.path,
-          v.quote ? normalise(v.quote) : ""
-        ]),
-        kind,
-        rule: v.rule,
-        path: f.path,
-        line: v.line,
-        quote: v.quote,
-        origin: kind === "blocking" ? v.origin : null,
-        summary: v.reason,
-        why: v.why || (rule ? `Rule ${rule.id}: ${rule.text}` : ""),
-        steps: v.steps,
-        resolution: v.resolution,
-        question: kind === "question" ? v.question || fallbackQuestion : null,
-        note: unverifiedFail
-          ? `possible fail; ${v.note ?? "the quote was not found in the file"}`
-          : v.note
-      };
-      (kind === "blocking" ? blocking : questions).push(draft);
+      if (settled.has(v.rule)) continue;
+      const draft = fileDraft(
+        rules.find((r) => r.id === v.rule),
+        f,
+        v
+      );
+      if (!draft) continue;
+      (draft.kind === "blocking" ? blocking : questions).push(draft);
     }
     for (const w of f.warnings) {
       const restates = [...blocking, ...questions].some(
@@ -303,32 +395,28 @@ export function buildFindings(
   }
   for (const c of crossFile) {
     if (c.verdict !== "FAIL" && c.verdict !== "UNSURE") continue;
-    if (c.verdict === "UNSURE" && questions.some((q) => q.rule === c.rule)) {
-      continue;
-    }
     const rule = rules.find((r) => r.id === c.rule);
-    const kind: FindingKind = c.verdict === "FAIL" ? "blocking" : "question";
+    const blocks = c.verdict === "FAIL";
     const facts = c.facts.map((f) => f.text).join("; ");
     const draft: Draft = {
-      key: stableKey([kind, c.rule, "cross-file"]),
-      kind,
+      key: stableKey([c.rule, ACROSS_FILES]),
+      kind: blocks ? "blocking" : "question",
       rule: c.rule,
-      path: c.facts[0]?.path ?? files[0]?.path ?? "",
+      path: ACROSS_FILES,
       line: null,
       quote: null,
-      origin: kind === "blocking" ? "introduced" : null,
+      origin: blocks ? "introduced" : null,
       summary: c.reason,
       why: c.why || (rule ? `Rule ${rule.id}: ${rule.text}` : ""),
       steps: c.steps,
       resolution: c.resolution,
-      question:
-        kind === "question" ? c.question || `Confirm: ${c.reason}` : null,
+      question: blocks ? null : c.question || `Confirm: ${c.reason}`,
       note:
         [c.note, facts ? `across files, from: ${facts}` : null]
           .filter(Boolean)
           .join("; ") || null
     };
-    (kind === "blocking" ? blocking : questions).push(draft);
+    (blocks ? blocking : questions).push(draft);
   }
   for (const u of intent?.unmentioned ?? []) {
     warnings.push({
