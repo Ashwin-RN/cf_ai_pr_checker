@@ -62,9 +62,11 @@ export function defaultRules(texts: string[]): Rule[] {
 }
 
 // The model's path hints become directory prefixes, kept only when the rule
-// text names every directory on the path (singular or plural). A hint the
-// rule does not name is dropped, and the rule then applies everywhere: a bad
-// hint can widen a rule, never narrow it to a directory the rule did not name.
+// text names that path: the directories in that order, joined by slashes,
+// each singular or plural, with or without a leading dot. Naming the
+// directories apart is not naming the path: "src/ or test/" does not name
+// src/test/. A hint the rule does not name is dropped, and the rule then
+// applies everywhere: a bad hint can widen a rule, never narrow it.
 export function scopeFrom(hints: string[], text: string): string[] | null {
   const out = new Set<string>();
   for (const hint of hints) {
@@ -73,19 +75,21 @@ export function scopeFrom(hints: string[], text: string): string[] | null {
     if (cut === -1) continue;
     const prefix = literal.slice(0, cut + 1).replace(/\/+/g, "/");
     const dirs = prefix.split("/").filter(Boolean);
-    if (dirs.length && dirs.every((dir) => named(dir, text))) out.add(prefix);
+    if (dirs.length && namesPath(dirs, text)) out.add(prefix);
   }
   return out.size ? [...out] : null;
 }
 
-function named(dir: string, text: string): boolean {
-  const stem = dir
-    .replace(/^\./, "")
-    .replace(/s$/i, "")
-    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return (
-    stem.length > 0 && new RegExp(`(^|[^\\w])${stem}s?(?!\\w)`, "i").test(text)
+function namesPath(dirs: string[], text: string): boolean {
+  const stems = dirs.map((dir) =>
+    dir
+      .replace(/^\./, "")
+      .replace(/s$/i, "")
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   );
+  if (stems.some((s) => s.length === 0)) return false;
+  const path = stems.map((s) => `\\.?${s}s?`).join("\\/");
+  return new RegExp(`(^|[^\\w])${path}(?!\\w)`, "i").test(text);
 }
 
 export function ruleApplies(rule: Rule, path: string): boolean {

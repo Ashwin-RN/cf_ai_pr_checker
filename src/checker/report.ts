@@ -68,10 +68,25 @@ function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+// Rules whose blocking items all sit on lines the pull request does not
+// change. Counted from the items, since such a rule may read UNSURE when
+// another file leaves it open.
+function unchangedOnly(r: CheckResult): number {
+  const rules = new Set<number>();
+  for (const f of r.findings) {
+    if (f.kind === "blocking" && f.rule !== null && f.origin === "pre-existing")
+      rules.add(f.rule);
+  }
+  for (const f of r.findings) {
+    if (f.kind === "blocking" && f.rule !== null && f.origin !== "pre-existing")
+      rules.delete(f.rule);
+  }
+  return rules.size;
+}
+
 function statusLine(r: CheckResult): string {
-  const failing = r.ruleStatuses.filter((s) => s.status === "FAIL");
-  const blocking = failing.filter((s) => s.blocking).length;
-  const preExisting = failing.length - blocking;
+  const blocking = r.ruleStatuses.filter((s) => s.blocking).length;
+  const preExisting = unchangedOnly(r);
   const unsure = r.ruleStatuses.filter(
     (s) => s.status === "UNSURE" || !s.complete
   ).length;

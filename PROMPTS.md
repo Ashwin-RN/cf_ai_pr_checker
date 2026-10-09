@@ -200,3 +200,21 @@ The Workers AI cap from the day before had not lifted at 03:00 UTC despite the d
 - The router hook checks the Durable Object class as well as the instance name, so an MCP session cannot be reached over the chat route.
 - The tool contract is tested over the SDK's in-memory transport against a faked workspace; the answer logic is tested on its own and through the assembly, where an answered item stays open in the diff rather than resolved. Live on a local server, with no model calls: the token and workspace guards, the router, a session over Streamable HTTP, and every tool through RPC to the workspace agent. A check over MCP against a real pull request waits, like the evaluation, for a day of Workers AI budget.
 - Left for later: `waive_rule`, which needs the exceptions table and the handling of a waived FAIL in the report and CI; and fetching a named file on request.
+
+**Prompt:**
+
+> [a third review, pasted without comment, of the commit `be167a5`]
+
+**What came out of it:** eleven findings, each reproduced by reading the code, and a change for each on the same branch, with a test named after the review's scenario.
+
+- A failure on a line the pull request does not change no longer outranks an open point on another file: the rule reads UNSURE and names both, so the check cannot pass over an unanswered question. Once the question is answered the rule returns to that failure, not to PASS.
+- A file checked in parts needs a verdict from every part; a part that says nothing about a rule leaves it UNSURE.
+- On a file checked in parts, an earlier finding counts as assessed only when the line it quoted was shown to the model again or is gone from the file, so a violation outside the windows is listed as not assessed rather than resolved. Under strict such a file is a coverage gap for every rule.
+- A cross-file PASS is held to uncut facts like a FAIL: a capped or cut fact list makes it a question.
+- A directory scope is kept only when the rule names the path itself; "src/ or test/" no longer admits `src/test/`.
+- The evaluation scores a blocking expectation on its own, so a rule that should block and comes back UNSURE fails the run.
+- An answer no longer settles a different question that a later push raises under the same key.
+- A finding one run could not assess is carried to the next until a run looks at it.
+- A result stored by an earlier build is filled in on read instead of failing to render.
+- A client-supplied check id is kept apart per workspace inside the Workflow, whose instance ids are unique per Workflow.
+- An answer that cites a pull request link is recorded as an answer, not run as a check.

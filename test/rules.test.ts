@@ -41,11 +41,32 @@ describe("scopeFrom", () => {
     expect(
       scopeFrom(
         [".github/workflows/*.yml"],
-        "Every GitHub Actions workflow pins"
+        "Every workflow under .github/workflows/ pins each action"
       )
     ).toEqual([".github/workflows/"]);
     expect(scopeFrom(["*.ts"], "Files end with a newline")).toBeNull();
     expect(scopeFrom([], "anything")).toBeNull();
+  });
+
+  it("keeps a nested prefix only when the rule names the path, not its directories apart", () => {
+    expect(
+      scopeFrom(["src/test/**"], "No logging in src/ or test/")
+    ).toBeNull();
+    expect(
+      scopeFrom(["src/**", "test/**"], "No logging in src/ or test/")
+    ).toEqual(["src/", "test/"]);
+    expect(
+      scopeFrom(
+        ["src/checker/**", "test/**"],
+        "Every change to the code under src/checker/ comes with a change to a test under test/"
+      )
+    ).toEqual(["src/checker/", "test/"]);
+    expect(
+      scopeFrom(
+        [".github/workflows/*.yml"],
+        "Every GitHub Actions workflow pins"
+      )
+    ).toBeNull();
   });
 
   it("never narrows below the directory and merges duplicates", () => {
@@ -58,13 +79,14 @@ describe("scopeFrom", () => {
     expect(scopeFrom(["srcx/**"], "Only src matters")).toBeNull();
   });
 
-  it("needs every directory on the path named, not only the last", () => {
+  it("needs the whole path named, not its directories one by one", () => {
     expect(
       scopeFrom(["invented/src/**"], "No console.log under src/")
     ).toBeNull();
-    expect(scopeFrom(["src/routes/*.ts"], "Routes in src/ have tests")).toEqual(
-      ["src/routes/"]
-    );
+    // "src/" and "routes" apart do not say where routes live.
+    expect(
+      scopeFrom(["src/routes/*.ts"], "Routes in src/ have tests")
+    ).toBeNull();
     expect(scopeFrom(["src/routes/*.ts"], "Every route has a test")).toBeNull();
   });
 });

@@ -221,6 +221,60 @@ describe("checkFile", () => {
     });
   });
 
+  // A 1500-line file with a console.log at each given line; the changed
+  // ones are added by the pull request, the rest sit unchanged.
+  function bigFile(changed: number[], unchanged: number[] = []) {
+    const line = (i: number) => `const v${i} = ${"x".repeat(60)};`;
+    const rows = Array.from({ length: 1500 }, (_, i) => line(i));
+    for (const n of [...changed, ...unchanged])
+      rows[n - 1] = `console.log(l${n});`;
+    const patch = changed
+      .map(
+        (n) => `@@ -${n},1 +${n},1 @@\n-${line(n - 1)}\n+console.log(l${n});`
+      )
+      .join("\n");
+    const pr: PrFile = {
+      ...file,
+      patch,
+      additions: changed.length,
+      deletions: changed.length
+    };
+    return { pr, text: rows.join("\n") + "\n" };
+  }
+
+  it("returns UNSURE when one part of a big file omits a rule's verdict", async () => {
+    const { pr, text } = bigFile([101, 1401]);
+    const { call, prompts } = caller([output([v(1, "PASS")]), output([])]);
+    const result = await checkFile([rule(1)], pr, paths, call, text);
+    expect(prompts).toHaveLength(2);
+    expect(result.verdicts[0]).toMatchObject({
+      verdict: "UNSURE",
+      verified: true,
+      reason: "the model returned no verdict for this rule in part 2 of 2",
+      question:
+        "Does src/a.ts meet rule 1? The check returned no verdict for it in part 2 of 2."
+    });
+  });
+
+  it("records which earlier findings the parts shown reached", async () => {
+    const { pr, text } = bigFile([1401], [101]);
+    const { call } = caller(output([v(1, "PASS")]));
+    const result = await checkFile([rule(1)], pr, paths, call, text, null, [
+      { key: "outside", quote: "console.log(l101);" },
+      { key: "shown", quote: "console.log(l1401);" },
+      { key: "gone", quote: "console.log(l999);" },
+      { key: "bare", quote: null }
+    ]);
+    expect(result.coverage).toBe("changes");
+    expect(result.seen).toEqual({ outside: false, shown: true, gone: true });
+    // With the diff alone a missing quote may sit anywhere in the file.
+    const diffOnly = await checkFile([rule(1)], file, paths, call, null, "n", [
+      { key: "there", quote: "console.log(a);" },
+      { key: "gone", quote: "console.log(z);" }
+    ]);
+    expect(diffOnly.seen).toEqual({ there: true, gone: false });
+  });
+
   it("returns UNSURE for a rule the model left out, not nothing", async () => {
     const rules = [rule(1, "No console.log"), rule(2, "No TODO")];
     const { call } = caller(output([v(1, "PASS")]));

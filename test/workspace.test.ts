@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   apiInstance,
+  checkIdOf,
   isApiWorkspace,
   isChatWorkspace,
   newChatWorkspace,
+  workflowInstance,
   workspaceOf
 } from "../src/workspace";
 
@@ -30,5 +32,22 @@ describe("workspaces", () => {
     expect(workspaceOf(apiInstance("ci"))).toBe("ci");
     const chat = newChatWorkspace();
     expect(workspaceOf(chat)).toBe(chat);
+  });
+
+  it("keeps a client's check id from colliding across workspaces in the Workflow", () => {
+    const a = workflowInstance(apiInstance("ci"), "review-1234");
+    const b = workflowInstance(apiInstance("dev"), "review-1234");
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{8}-review-1234$/);
+    expect(checkIdOf(apiInstance("ci"), a)).toBe("review-1234");
+    expect(checkIdOf(apiInstance("dev"), b)).toBe("review-1234");
+    const longest = workflowInstance(
+      apiInstance("a".repeat(64)),
+      "b".repeat(64)
+    );
+    expect(longest.length).toBeLessThanOrEqual(100);
+    expect(longest).toMatch(/^[0-9a-z-]+$/);
+    // An instance started before the prefix existed carries the check id itself.
+    expect(checkIdOf(apiInstance("ci"), "review-1234")).toBe("review-1234");
   });
 });

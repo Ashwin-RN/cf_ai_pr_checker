@@ -10,7 +10,6 @@ import {
   GithubError,
   canonicalPrUrl,
   fetchRawFile,
-  findPrUrl,
   parsePrUrl
 } from "./checker/github";
 import { limits } from "./checker/limits";
@@ -36,14 +35,17 @@ import type {
   RuleSet,
   RuleStatus
 } from "./checker/types";
+import { parseCommand } from "./commands";
 import { CheckMcp, type McpProps } from "./mcp";
 import { Store, type Sql } from "./store";
 import type { CheckParams, RulesLookup } from "./workflow";
 import { streamChatResponse, toChatMessages } from "./workers-ai";
 import {
   apiInstance,
+  checkIdOf,
   isApiWorkspace,
   isChatWorkspace,
+  workflowInstance,
   workspaceOf
 } from "./workspace";
 
@@ -176,8 +178,6 @@ export type AnswerOutcome =
     }
   | { ok: false; message: string };
 
-const ANSWER = /^\s*answer\s+(\S+?)(?:\s+on\s+(\S+))?\s*:\s*([\s\S]+)$/i;
-
 // A check this instance is waiting on: where its progress goes and how its
 // end is delivered.
 type Waiter = {
@@ -207,13 +207,20 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   // Routing is by code. The model only answers free-form questions.
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const text = lastUserText(this.messages);
-    const prUrl = findPrUrl(text);
-    if (prUrl) return this.checkResponse(prUrl);
-    if (/^\s*rules:/i.test(text)) return this.rulesResponse(text);
-    if (/^\s*history\s*$/i.test(text)) return reply(this.historyMarkdown());
-    const answer = ANSWER.exec(text);
-    if (answer) {
-      return reply(this.answerMarkdown(answer[1], answer[2], answer[3]));
+    const command = parseCommand(text);
+    switch (command.kind) {
+      case "rules":
+        return this.rulesResponse(command.text);
+      case "history":
+        return reply(this.historyMarkdown());
+      case "answer":
+        return reply(
+          this.answerMarkdown(command.question, command.checkId, command.text)
+        );
+      case "check":
+        return this.checkResponse(command.prUrl);
+      case "chat":
+        break;
     }
 
     const current = this.store.currentRules();
@@ -514,12 +521,15 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     }
   }
 
+  // The Workflow callbacks name the instance; the waiters and the store are
+  // keyed by the check id it carries.
   async onWorkflowProgress(
     _workflowName: string,
     workflowId: string,
     progress: unknown
   ) {
-    this.waiters.get(workflowId)?.onProgress?.(progress as Progress);
+    const id = checkIdOf(this.name, workflowId);
+    this.waiters.get(id)?.onProgress?.(progress as Progress);
   }
 
   async onWorkflowComplete(_workflowName: string, workflowId: string) {
@@ -532,11 +542,12 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     workflowId: string,
     error: string
   ) {
-    const state = this.store.checkState(workflowId);
-    if (state && !state.result) this.store.failCheck(workflowId, error);
-    const waiter = this.waiters.get(workflowId);
+    const id = checkIdOf(this.name, workflowId);
+    const state = this.store.checkState(id);
+    if (state && !state.result) this.store.failCheck(id, error);
+    const waiter = this.waiters.get(id);
     if (waiter) {
-      this.delivered.add(workflowId);
+      this.delivered.add(id);
       waiter.reject(new CheckError("error", `The check failed: ${error}`));
     }
     await this.deliverIfLost(workflowId);
@@ -546,10 +557,11 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   // instance restarted while the Workflow ran, still gets its report: it is
   // appended to the conversation here.
   private async deliverIfLost(workflowId: string): Promise<void> {
+    const id = checkIdOf(this.name, workflowId);
     const info = this.getWorkflow(workflowId);
     const source = (info?.metadata as { source?: string } | undefined)?.source;
-    if (source === "chat" && !this.delivered.has(workflowId)) {
-      const state = this.store.checkState(workflowId);
+    if (source === "chat" && !this.delivered.has(id)) {
+      const state = this.store.checkState(id);
       const text = state?.result
         ? renderReport(state.result, { json: false })
         : `The check failed: ${state?.error ?? "unknown error"}`;
@@ -558,7 +570,7 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
         assistantMessage(text)
       ]);
     }
-    this.delivered.delete(workflowId);
+    this.delivered.delete(id);
     this.deleteWorkflow(workflowId);
   }
 
@@ -664,7 +676,7 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   // <check id>: ..." names one.
   private answerMarkdown(
     question: string,
-    checkId: string | undefined,
+    checkId: string | null,
     text: string
   ): string {
     const id = checkId ?? this.store.latestCheckId();
@@ -796,6 +808,7 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     options: CheckOptions
   ): Promise<CheckResult> {
     const id = input.id;
+    const workflowId = workflowInstance(this.name, id);
     const params: CheckParams = {
       ...input,
       runner: "workflow",
@@ -829,16 +842,20 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
         } else if (Date.now() > deadline) {
           const minutes = Math.round(limits.checkWaitMs / 60_000);
           const message = `The check did not finish within ${minutes} minutes.`;
-          this.terminateWorkflow(id).catch(() => {});
+          this.terminateWorkflow(workflowId).catch(() => {});
           this.store.failCheck(id, message);
           waiter.reject(new CheckError("error", message));
         }
       }, limits.checkPollMs);
       this.waiters.set(id, waiter);
       this.runWorkflow("CHECK_WORKFLOW", params, {
-        id,
+        id: workflowId,
         agentBinding: "ChatAgent",
-        metadata: { prUrl: input.prUrl, source: options.source ?? "api" }
+        metadata: {
+          checkId: id,
+          prUrl: input.prUrl,
+          source: options.source ?? "api"
+        }
       }).catch((e: Error) => {
         this.store.failCheck(id, e.message);
         waiter.reject(e);

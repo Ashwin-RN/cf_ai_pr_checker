@@ -37,10 +37,17 @@ function at(path: string, line: number | null): string {
 // Whether a checked file settles a rule for its own path. A file checked
 // around its changes settles a prohibition and a rule that spans files, both
 // of which are about the change; a per-file requirement may be met anywhere
-// in the file, so the part not shown is a gap.
-export function covers(file: FileCheck, rule: Rule | null): boolean {
+// in the file, so the part not shown is a gap. Under strict a failure on an
+// unchanged line blocks, and one may sit outside the parts shown, so such a
+// file is a gap for every rule.
+export function covers(
+  file: FileCheck,
+  rule: Rule | null,
+  strict = false
+): boolean {
   if (file.state !== "checked" || file.coverage === "partial") return false;
   if (file.coverage === "full") return true;
+  if (strict) return false;
   return (
     rule === null || rule.polarity === "must_not" || rule.scope === "cross_file"
   );
@@ -51,7 +58,8 @@ export function covers(file: FileCheck, rule: Rule | null): boolean {
 export function ruleGaps(
   rule: Rule,
   files: FileCheck[],
-  notChecked: Skipped[]
+  notChecked: Skipped[],
+  strict = false
 ): string[] {
   const gaps: string[] = [];
   for (const n of notChecked) {
@@ -60,7 +68,9 @@ export function ruleGaps(
     }
   }
   for (const f of files) {
-    if (ruleApplies(rule, f.path) && !covers(f, rule)) gaps.push(f.path);
+    if (ruleApplies(rule, f.path) && !covers(f, rule, strict)) {
+      gaps.push(f.path);
+    }
   }
   return gaps;
 }
@@ -73,13 +83,17 @@ function listed(paths: string[]): string {
 // A cross-file verdict rests on each file's summary of itself, not on code.
 // A FAIL from it stands only when every file the rule needed was checked and
 // no summary was cut short; otherwise what the rule requires may sit in what
-// was not seen, and the fail is a question.
+// was not seen. A PASS stands only when no summary was cut short, since a
+// change the rule applies to may sit in a fact that was not listed; a file
+// not checked turns it into a question at the merge. Either way the verdict
+// becomes a question that says what was missing.
 export function gateCrossFile(
   rules: Rule[],
   crossFile: CrossFileVerdict[],
   files: FileCheck[],
   notChecked: Skipped[],
-  factsCut: boolean
+  factsCut: boolean,
+  strict = false
 ): CrossFileVerdict[] {
   const capped = files
     .filter(
@@ -87,9 +101,12 @@ export function gateCrossFile(
     )
     .map((f) => f.path);
   return crossFile.map((c) => {
-    if (c.verdict !== "FAIL") return c;
+    if (c.verdict !== "FAIL" && c.verdict !== "PASS") return c;
     const rule = rules.find((r) => r.id === c.rule);
-    const gaps = rule ? ruleGaps(rule, files, notChecked) : [];
+    const gaps =
+      c.verdict === "FAIL" && rule
+        ? ruleGaps(rule, files, notChecked, strict)
+        : [];
     const reasons = [
       gaps.length ? `not checked: ${listed(gaps)}` : null,
       capped.length
@@ -99,26 +116,70 @@ export function gateCrossFile(
     ].filter((s): s is string => s !== null);
     if (!reasons.length) return c;
     const reason = c.reason.replace(/\.$/, "");
+    const stands = c.verdict === "FAIL" ? "fail" : "pass";
     return {
       ...c,
       verdict: "UNSURE",
       note: [
         c.note,
-        `a fail across files stands only on complete facts; ${reasons.join("; ")}`
+        `a ${stands} across files stands only on complete facts; ${reasons.join("; ")}`
       ]
         .filter(Boolean)
         .join("; "),
       question:
         c.question ||
-        `On the facts seen rule ${c.rule} fails (${reason}). Is what it requires in a file or a fact the check did not see?`
+        (c.verdict === "FAIL"
+          ? `On the facts seen rule ${c.rule} fails (${reason}). Is what it requires in a file or a fact the check did not see?`
+          : `On the facts seen rule ${c.rule} passes (${reason}). Does this pull request make a change the rule applies to that the facts did not list?`)
     };
   });
 }
 
-// Per rule, across files. A rule one file can decide: verified FAIL wins,
-// then anything unsettled, then PASS when nothing in scope was left
-// unchecked. A rule that spans files takes the cross-file verdict; a file's
-// own verdict on it was one of that step's inputs and never decides alone.
+type Hit = { path: string; v: FileVerdict };
+type Where = { path: string; line: number | null };
+
+// Where a rule fails, naming an added line first when there is one.
+function failDetail(fails: Where[], introduced: Where[]): string {
+  const first = introduced[0] ?? fails[0];
+  const where = at(first.path, first.line);
+  const detail =
+    fails.length === 1
+      ? `fails in ${where}`
+      : `fails in ${fails.length} files, first ${where}`;
+  if (introduced.length) return detail;
+  return (
+    detail +
+    (fails.length === 1
+      ? " on a line this pull request does not change"
+      : ", all on lines this pull request does not change")
+  );
+}
+
+// What the files left unsettled on a rule, if anything: a FAIL whose quote
+// was not found, a question, or a PASS claimed without a line.
+function openDetail(hits: Hit[]): string | null {
+  const unverified = hits.find((h) => h.v.verdict === "FAIL" && !h.v.verified);
+  if (unverified) {
+    return `possible fail in ${unverified.path}, quote not verified`;
+  }
+  const unsure = hits.filter((h) => h.v.verdict === "UNSURE");
+  if (unsure.length) {
+    return `needs an answer for ${listed(unsure.map((h) => h.path))}`;
+  }
+  const claimed = hits.filter((h) => h.v.verdict === "PASS" && !h.v.verified);
+  if (claimed.length) {
+    return `pass claimed without a verified quote in ${listed(claimed.map((h) => h.path))}`;
+  }
+  return null;
+}
+
+// Per rule, across files. A rule one file can decide: a verified FAIL on an
+// added line wins, then anything unsettled, then a verified FAIL on lines
+// the pull request does not change, then PASS when nothing in scope was
+// left unchecked. The unsettled outranks the unchanged failure because that
+// failure does not block and the open point may. A rule that spans files
+// takes the cross-file verdict; a file's own verdict on it was one of that
+// step's inputs and never decides alone.
 export function ruleStatuses(
   rules: Rule[],
   files: FileCheck[],
@@ -128,7 +189,7 @@ export function ruleStatuses(
 ): RuleStatus[] {
   const checked = files.filter((f) => f.state === "checked");
   return rules.map((rule) => {
-    const gaps = ruleGaps(rule, files, notChecked);
+    const gaps = ruleGaps(rule, files, notChecked, strict);
     const complete = gaps.length === 0;
     const status = (
       s: Verdict,
@@ -193,49 +254,30 @@ export function ruleStatuses(
           : "needs the cross-file step, which did not run"
       );
     }
-    const fails = hits.filter((h) => h.v.verdict === "FAIL" && h.v.verified);
-    if (fails.length) {
-      const introduced = fails.filter((h) => h.v.origin !== "pre-existing");
-      const first = introduced[0] ?? fails[0];
-      const where = at(first.path, first.v.line);
-      let detail =
-        fails.length === 1
-          ? `fails in ${where}`
-          : `fails in ${fails.length} files, first ${where}`;
-      if (!introduced.length) {
-        detail +=
-          fails.length === 1
-            ? " on a line this pull request does not change"
-            : ", all on lines this pull request does not change";
-      }
-      return status("FAIL", strict || introduced.length > 0, detail);
+    const where = (h: Hit): Where => ({ path: h.path, line: h.v.line });
+    const fails = hits
+      .filter((h) => h.v.verdict === "FAIL" && h.v.verified)
+      .map(where);
+    const introduced = hits
+      .filter(
+        (h) =>
+          h.v.verdict === "FAIL" &&
+          h.v.verified &&
+          h.v.origin !== "pre-existing"
+      )
+      .map(where);
+    if (introduced.length || (strict && fails.length)) {
+      return status("FAIL", true, failDetail(fails, introduced));
     }
-    const unverified = hits.find(
-      (h) => h.v.verdict === "FAIL" && !h.v.verified
-    );
-    if (unverified) {
+    const open = openDetail(hits);
+    if (open) {
       return status(
         "UNSURE",
         false,
-        `possible fail in ${unverified.path}, quote not verified`
+        fails.length ? `${open}; also ${failDetail(fails, [])}` : open
       );
     }
-    const unsure = hits.filter((h) => h.v.verdict === "UNSURE");
-    if (unsure.length) {
-      return status(
-        "UNSURE",
-        false,
-        `needs an answer for ${listed(unsure.map((h) => h.path))}`
-      );
-    }
-    const claimed = hits.filter((h) => h.v.verdict === "PASS" && !h.v.verified);
-    if (claimed.length) {
-      return status(
-        "UNSURE",
-        false,
-        `pass claimed without a verified quote in ${listed(claimed.map((h) => h.path))}`
-      );
-    }
+    if (fails.length) return status("FAIL", false, failDetail(fails, []));
     const passes = hits.filter((h) => h.v.verdict === "PASS").length;
     if (passes) {
       return complete
@@ -490,7 +532,9 @@ function preview(text: string): string {
 // because of answered questions passes by attestation, and says so. An
 // answer never touches a FAIL, never fills a coverage gap, and counts for
 // nothing under strict. Rule ids are positions in the rules file, so an
-// answer given against another rule set is stale and does not count.
+// answer given against another rule set is stale and does not count; nor
+// does one given to a question that has since changed under the same key,
+// since a key names where a question sits, not what it asks.
 export function applyAttestations(
   statuses: RuleStatus[],
   findings: Finding[],
@@ -502,12 +546,13 @@ export function applyAttestations(
   const answered = findings.map((f): Finding => {
     const a = f.kind === "question" ? byKey.get(f.key) : undefined;
     if (!a) return { ...f, attestation: null };
-    const stale = a.rulesHash !== rulesHash;
     const note = strict
       ? "not counted: the check is strict"
-      : stale
+      : a.rulesHash !== rulesHash
         ? "not counted: the rules changed since the answer"
-        : null;
+        : normalise(a.question) !== normalise(f.question ?? f.summary)
+          ? "not counted: the question changed since the answer"
+          : null;
     return {
       ...f,
       attestation: {
@@ -526,6 +571,27 @@ export function applyAttestations(
     );
     if (!questions.length || !questions.every((q) => q.attestation?.counted)) {
       return s;
+    }
+    // A failure on lines the pull request does not change is still there
+    // once the questions are answered; the rule returns to that, not to PASS.
+    const unchanged = findings.filter(
+      (f) =>
+        f.kind === "blocking" &&
+        f.rule === s.rule &&
+        f.origin === "pre-existing"
+    );
+    if (unchanged.length) {
+      const fails = unchanged.map((f) => ({ path: f.path, line: f.line }));
+      const settled =
+        questions.length === 1
+          ? "its question is answered"
+          : `${questions.length} questions are answered`;
+      return {
+        ...s,
+        status: "FAIL",
+        blocking: false,
+        detail: `${failDetail(fails, [])}; ${settled} by attestation`
+      };
     }
     const answers = questions.map((q) => q.attestation?.answer ?? "");
     const detail =

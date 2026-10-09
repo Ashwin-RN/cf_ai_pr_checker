@@ -103,6 +103,33 @@ describe("score", () => {
     expect(failed([row])).toBe(true);
   });
 
+  it("fails the run when a rule that should block comes back UNSURE while another rule keeps the status at fail", () => {
+    const expected: Case = {
+      ...c,
+      rules: { "1": "FAIL", "4": "FAIL" },
+      blocking: { "4": true }
+    };
+    const row = score(
+      expected,
+      ok,
+      answer({
+        status: "fail",
+        rules: [
+          { id: 1, status: "FAIL", blocking: true },
+          { id: 4, status: "UNSURE", blocking: false }
+        ]
+      }),
+      1
+    );
+    expect(row.wrong).toEqual([
+      "4: UNSURE not FAIL",
+      "4: does not block but should"
+    ]);
+    expect(row.missed).toBe(1);
+    expect(row.falsePass).toBe(1);
+    expect(failed([row])).toBe(true);
+  });
+
   it("counts a rule that blocks and should not as a false FAIL, which does not fail the run", () => {
     const preExisting: Case = {
       ...c,

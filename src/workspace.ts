@@ -4,6 +4,8 @@
 // caller gives behind the bearer token, kept apart by a prefix no chat id
 // can carry.
 
+import { stableKey } from "./checker/merge";
+
 export const CHAT_WORKSPACE = /^[a-z0-9]{20,}$/;
 export const API_WORKSPACE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -31,4 +33,23 @@ export function workspaceOf(instance: string): string {
 
 export function newChatWorkspace(): string {
   return crypto.randomUUID().replaceAll("-", "");
+}
+
+// A Workflow instance id is unique per Workflow, and a caller may name its
+// check, so two workspaces naming the same check must not collide: the
+// instance id carries a short hash of the workspace instance in front of
+// the check id. The hash keeps the id within the platform's 100 characters
+// and its character set, which an instance name with a colon does not.
+export function workflowInstance(instance: string, checkId: string): string {
+  return `${stableKey([instance])}-${checkId}`;
+}
+
+// The check id behind a Workflow instance id. An id without this
+// workspace's prefix is one from before the prefix existed, and is the
+// check id itself.
+export function checkIdOf(instance: string, workflowId: string): string {
+  const prefix = `${stableKey([instance])}-`;
+  return workflowId.startsWith(prefix)
+    ? workflowId.slice(prefix.length)
+    : workflowId;
 }

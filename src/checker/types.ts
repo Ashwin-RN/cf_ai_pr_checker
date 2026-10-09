@@ -83,6 +83,11 @@ export type FileCheck = {
   verdicts: FileVerdict[];
   facts: string[];
   warnings: FileWarning[];
+  // For each finding of the last check on this path that quoted a line, by
+  // key: true when this check showed that line to the model again or the
+  // line is gone from the file, false when the line is still in the file
+  // but outside the parts shown.
+  seen: Record<string, boolean>;
   raw: string | null;
 };
 
@@ -169,7 +174,8 @@ export type CheckStatus = "pass" | "fail" | "unsure";
 // Where a check ran: as a Cloudflare Workflow, or inside the Durable Object.
 export type Runner = "workflow" | "inline";
 
-// What the last finished check of the same pull request found.
+// What the last finished check of the same pull request found, plus what it
+// carried as not assessed, so an item stays known until a run looks at it.
 export type PreviousRun = {
   checkId: string;
   headSha: string;
@@ -180,6 +186,8 @@ export type PreviousRun = {
     kind: FindingKind;
     rule: number | null;
     path: string;
+    line: number | null;
+    quote: string | null;
     summary: string;
   }>;
 };

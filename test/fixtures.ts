@@ -50,6 +50,7 @@ export function file(
     verdicts,
     facts: [],
     warnings: [],
+    seen: {},
     raw: null,
     ...extra
   };

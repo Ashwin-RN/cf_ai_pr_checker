@@ -21,6 +21,58 @@ export type CheckRow = {
   finishedAt: number | null;
 };
 
+// A stored result from an earlier build of the checker lacks the fields
+// added since. They are filled in on read so every stored report renders
+// and compares; nothing is rewritten.
+export function readResult(json: string): CheckResult {
+  const r = JSON.parse(json) as CheckResult;
+  r.ruleStatuses = r.ruleStatuses.map((s) => ({
+    ...s,
+    complete: s.complete ?? r.coverageComplete ?? true,
+    attested: s.attested ?? false
+  }));
+  r.findings = r.findings.map((f) => ({
+    ...f,
+    attestation: f.attestation ?? null
+  }));
+  r.files = (r.files ?? []).map((f) => ({ ...f, seen: f.seen ?? {} }));
+  r.crossFile ??= [];
+  r.notChecked ??= [];
+  if (r.previous) {
+    r.previous.resolved ??= [];
+    r.previous.unassessed ??= [];
+  }
+  return r;
+}
+
+// What the next check of the same pull request compares against: the
+// findings of this one, and the earlier findings it could not assess, so an
+// item stays known until a run looks at where it came from.
+export function previousRunOf(r: CheckResult): PreviousRun {
+  const seen = new Set<string>();
+  const findings: PreviousRun["findings"] = [];
+  for (const f of [...r.findings, ...(r.previous?.unassessed ?? [])]) {
+    if (seen.has(f.key)) continue;
+    seen.add(f.key);
+    findings.push({
+      id: f.id,
+      key: f.key,
+      kind: f.kind,
+      rule: f.rule,
+      path: f.path,
+      line: f.line ?? null,
+      quote: f.quote ?? null,
+      summary: f.summary
+    });
+  }
+  return {
+    checkId: r.id,
+    headSha: r.pr.headSha,
+    rulesHash: r.rulesHash,
+    findings
+  };
+}
+
 // Rules, checks and per-file results live in the Durable Object's SQLite.
 export class Store {
   constructor(private sql: Sql) {}
@@ -133,18 +185,14 @@ export class Store {
     return {
       status: row.status,
       error: row.error,
-      result: row.result_json
-        ? (JSON.parse(row.result_json) as CheckResult)
-        : null
+      result: row.result_json ? readResult(row.result_json) : null
     };
   }
 
   getCheck(id: string): CheckResult | null {
     const row = this.sql<{ result_json: string | null }>`
       SELECT result_json FROM checks WHERE id = ${id}`[0];
-    return row?.result_json
-      ? (JSON.parse(row.result_json) as CheckResult)
-      : null;
+    return row?.result_json ? readResult(row.result_json) : null;
   }
 
   // The id a caller gave, or the one check it is a prefix of. The chat shows
@@ -171,21 +219,7 @@ export class Store {
     const row = this.sql<{ result_json: string | null }>`
       SELECT result_json FROM checks WHERE pr_url = ${prUrl} AND result_json IS NOT NULL
       ORDER BY started_at DESC LIMIT 1`[0];
-    if (!row?.result_json) return null;
-    const r = JSON.parse(row.result_json) as CheckResult;
-    return {
-      checkId: r.id,
-      headSha: r.pr.headSha,
-      rulesHash: r.rulesHash,
-      findings: r.findings.map((f) => ({
-        id: f.id,
-        key: f.key,
-        kind: f.kind,
-        rule: f.rule,
-        path: f.path,
-        summary: f.summary
-      }))
-    };
+    return row?.result_json ? previousRunOf(readResult(row.result_json)) : null;
   }
 
   // An answer to a question, kept per pull request and finding key. A new

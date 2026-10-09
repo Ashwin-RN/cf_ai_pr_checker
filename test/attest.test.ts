@@ -199,6 +199,78 @@ describe("applyAttestations", () => {
     expect(out.statuses[0]).toMatchObject({ status: "PASS", attested: true });
   });
 
+  it("does not count an answer once the question changed under the same key", () => {
+    const key = stableKey([2, ACROSS_FILES]);
+    const given = answer(key, {
+      rule: 2,
+      path: ACROSS_FILES,
+      question: "Is /login tested?"
+    });
+    const login = question("Q1", 2, ACROSS_FILES, {
+      key,
+      question: "Is /login tested?"
+    });
+    const first = applyAttestations(
+      [unsure(2)],
+      [login],
+      [given],
+      RULES_HASH,
+      false
+    );
+    expect(first.statuses[0]).toMatchObject({ status: "PASS", attested: true });
+    // A later push asks a different question at the same place.
+    const admin = { ...login, question: "Is /admin/delete tested?" };
+    const second = applyAttestations(
+      [unsure(2)],
+      [admin],
+      [given],
+      RULES_HASH,
+      false
+    );
+    expect(second.statuses[0]).toMatchObject({
+      status: "UNSURE",
+      attested: false
+    });
+    expect(second.findings[0].attestation).toMatchObject({
+      counted: false,
+      note: "not counted: the question changed since the answer"
+    });
+  });
+
+  it("returns a rule with a failure on an unchanged line to FAIL (pre-existing) once its question is answered", () => {
+    const old = question("F1", 1, "src/b.ts", {
+      kind: "blocking",
+      key: "old",
+      line: 3,
+      quote: "console.log(x)",
+      origin: "pre-existing",
+      question: null
+    });
+    const q = question("Q1", 1, "src/a.ts");
+    const out = applyAttestations(
+      [
+        {
+          ...unsure(1),
+          detail:
+            "needs an answer for src/a.ts; also fails in src/b.ts:3 on a line this pull request does not change"
+        }
+      ],
+      [old, q],
+      [answer(q.key)],
+      RULES_HASH,
+      false
+    );
+    expect(out.statuses[0]).toMatchObject({
+      status: "FAIL",
+      blocking: false,
+      attested: false,
+      complete: true,
+      detail:
+        "fails in src/b.ts:3 on a line this pull request does not change; its question is answered by attestation"
+    });
+    expect(out.findings[1].attestation?.counted).toBe(true);
+  });
+
   it("cuts a long answer in the rule table and keeps it whole on the item", () => {
     const q = question("Q1", 1, "src/a.ts");
     const long = "x".repeat(200);
