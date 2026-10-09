@@ -31,6 +31,42 @@ export function parseHunks(patch: string): HunkLine[] {
   return out;
 }
 
+// The whole file as it is after the pull request, with the lines the patch
+// adds marked and the lines it removes shown in place without a number.
+export function fileLines(content: string, patch: string): HunkLine[] {
+  const added = new Set<number>();
+  const removedBefore = new Map<number, HunkLine[]>();
+  let pending: HunkLine[] = [];
+  let last = 0;
+  for (const l of parseHunks(patch)) {
+    if (l.line === null) {
+      pending.push(l);
+      continue;
+    }
+    if (l.kind === "add") added.add(l.line);
+    if (pending.length) {
+      removedBefore.set(l.line, pending);
+      pending = [];
+    }
+    last = l.line;
+  }
+  const rows = content.split("\n").map((t) => t.replace(/\r$/, ""));
+  if (rows.length && rows[rows.length - 1] === "") rows.pop();
+  if (pending.length)
+    removedBefore.set(Math.max(last, rows.length) + 1, pending);
+  const out: HunkLine[] = [];
+  const emitRemoved = (n: number) => {
+    for (const r of removedBefore.get(n) ?? []) out.push(r);
+  };
+  rows.forEach((text, i) => {
+    const line = i + 1;
+    emitRemoved(line);
+    out.push({ kind: added.has(line) ? "add" : "ctx", line, text });
+  });
+  for (const [n, rs] of removedBefore) if (n > rows.length) out.push(...rs);
+  return out;
+}
+
 // What the model sees: marker, new-file line number, content.
 export function renderHunks(
   lines: HunkLine[],
@@ -49,7 +85,7 @@ export function renderHunks(
     const row = `${marker}${number.padStart(6)} | ${l.text}`;
     chars += row.length + 1;
     if (chars > maxChars) {
-      rows.push("[diff cut here: over the size cap]");
+      rows.push("[cut here: over the size cap]");
       return { text: rows.join("\n"), truncated: true };
     }
     rows.push(row);
@@ -57,11 +93,43 @@ export function renderHunks(
   return { text: rows.join("\n"), truncated: false };
 }
 
+export type Chunking = { chunks: HunkLine[][]; cut: boolean };
+
+// A file that fits goes in one piece. A bigger one is cut into windows around
+// its changes, each with context either side. Windows that touch are merged.
+export function chunkLines(
+  lines: HunkLine[],
+  maxChars: number = limits.charsPerModelCall,
+  context: number = limits.hunkContextLines,
+  maxChunks: number = limits.chunksPerFile
+): Chunking {
+  if (!renderHunks(lines, maxChars).truncated) {
+    return { chunks: [lines], cut: false };
+  }
+  const windows: Array<[number, number]> = [];
+  lines.forEach((l, i) => {
+    if (l.kind === "ctx") return;
+    const start = Math.max(0, i - context);
+    const end = Math.min(lines.length - 1, i + context);
+    const previous = windows[windows.length - 1];
+    if (previous && start <= previous[1] + 1) previous[1] = end;
+    else windows.push([start, end]);
+  });
+  const chunks = windows
+    .slice(0, maxChunks)
+    .map(([s, e]) => lines.slice(s, e + 1));
+  const cut =
+    windows.length > maxChunks ||
+    chunks.some((c) => renderHunks(c, maxChars).truncated);
+  return { chunks, cut };
+}
+
 export function normalise(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
-// Finds the shown line a quote came from: added lines first, exact match before substring.
+// Finds the shown line a quote came from. A whole-line match wins, added
+// lines before context; a substring counts only once it is long enough.
 export function findQuote(quote: string, lines: HunkLine[]): HunkLine | null {
   const first = quote.split("\n").find((s) => s.trim());
   const q = first ? normalise(first.replace(/^[+-]?\s*\d*\s*\|\s?/, "")) : "";
@@ -71,6 +139,7 @@ export function findQuote(quote: string, lines: HunkLine[]): HunkLine | null {
     const hit = lines.find((l) => l.kind === kind && normalise(l.text) === q);
     if (hit) return hit;
   }
+  if (q.length < limits.quoteSubstringMinChars) return null;
   for (const kind of order) {
     const hit = lines.find(
       (l) => l.kind === kind && normalise(l.text).includes(q)
@@ -120,7 +189,7 @@ export function annotateSteps(
         path === ownPath &&
         !lines.some((l) => l.line === Number(line))
       ) {
-        return `${token} (line not in the diff)`;
+        return `${token} (line not shown)`;
       }
       return token;
     })

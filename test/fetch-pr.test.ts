@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { GithubError, fetchPr, findPrUrl } from "../src/checker/github";
+import {
+  GithubError,
+  fetchPr,
+  fetchRawFile,
+  findPrUrl
+} from "../src/checker/github";
 
 type Route = (req: Request) => Response;
 
@@ -118,5 +123,69 @@ describe("findPrUrl", () => {
       )
     ).toBe("https://github.com/o/r/pull/4");
     expect(findPrUrl("no link")).toBeNull();
+  });
+});
+
+describe("fetchRawFile", () => {
+  const at = "/o/r/abc/src/a%20b.ts";
+  it("reads a text file at the head commit with the path encoded", async () => {
+    const seen: Request[] = [];
+    const fetch = fakeFetch(
+      { [at]: () => new Response("const a = 1;\n") },
+      seen
+    );
+    const out = await fetchRawFile(ref, "abc", "src/a b.ts", {
+      fetch,
+      token: "t"
+    });
+    expect(out).toEqual({ ok: true, text: "const a = 1;\n" });
+    expect(seen[0].url).toBe(
+      "https://raw.githubusercontent.com/o/r/abc/src/a%20b.ts"
+    );
+    expect(seen[0].headers.get("authorization")).toBe("Bearer t");
+  });
+
+  it("reports missing, binary and oversized files instead of throwing", async () => {
+    const missing = fakeFetch({
+      [at]: () => new Response("", { status: 404 })
+    });
+    expect(
+      await fetchRawFile(ref, "abc", "src/a b.ts", { fetch: missing })
+    ).toEqual({
+      ok: false,
+      reason: "not found"
+    });
+    const binary = fakeFetch({
+      [at]: () => new Response(new Uint8Array([0x89, 0x50, 0x00, 0x47]))
+    });
+    expect(
+      await fetchRawFile(ref, "abc", "src/a b.ts", { fetch: binary })
+    ).toEqual({
+      ok: false,
+      reason: "binary"
+    });
+    const big = fakeFetch({
+      [at]: () =>
+        new Response("x", { headers: { "content-length": "2000000" } })
+    });
+    expect(
+      await fetchRawFile(ref, "abc", "src/a b.ts", { fetch: big })
+    ).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/^over /)
+    });
+  });
+
+  it("maps a rate limit on the raw host to the same typed error", async () => {
+    const limited = fakeFetch({
+      [at]: () =>
+        new Response("", {
+          status: 429,
+          headers: { "x-ratelimit-remaining": "0" }
+        })
+    });
+    await expect(
+      fetchRawFile(ref, "abc", "src/a b.ts", { fetch: limited })
+    ).rejects.toMatchObject({ kind: "rate_limited" });
   });
 });

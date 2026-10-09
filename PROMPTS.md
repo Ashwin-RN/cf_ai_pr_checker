@@ -94,3 +94,29 @@ Testing the chat in the browser showed every streamed word twice. The raw Worker
 - The same engine answers the chat and `POST /api/check`, which takes a bearer token.
 
 Smoke-tested against this repository's own pull request #1, in the chat and over the API.
+
+## 2026-10-08: M2, full files, rules that span files, and the loop
+
+**Prompt:**
+
+> can we start m2?
+
+**What came out of it:** the branch `m2-widen`. The check now sees whole files and the report closes the loop with the agent that wrote the code.
+
+- Each changed file is fetched in full at the head commit and shown with the added and removed lines marked. A file over the size cap is checked in parts around its changes, and past six parts it counts as partially checked.
+- With whole files in view, an old violation on an untouched line would fail every pull request that touches the file. A verified FAIL on a line the pull request does not change is now labelled pre-existing: reported with its quote, kept as FAIL per rule, but not blocking unless the check runs in strict mode.
+- Rules that span files are settled by one call over numbered facts from every checked file plus the file list. A verdict is accepted only when it cites facts that exist.
+- One call compares the title and description with the facts. Changes the description does not mention, and claims the files do not support, land in Warnings and the Intent section.
+- A second check of the same pull request marks each finding new or still open and lists what was resolved, by stable key.
+- Rules come from `pr-rules.md` at the base branch of the checked repository when it has one, or from the pull request itself when it adds the file. This repository has one, and `templates/pr-rules.md` is a starter. Rules sent with an API request come first, then the file, then the workspace's saved rules.
+- Coverage is tracked per rule, so a lockfile or a file outside a rule's directory does not downgrade that rule. A quote now verifies on a whole-line match, or a substring only past twelve characters, because substring matching over a whole file would verify almost anything.
+- A public fixture repository holds eleven open pull requests, one per case: clean, a console.log, a prompt injection beside a real violation, near-duplicate lines, more files than the cap, a TODO without a link, a pre-existing violation, a new function without a test, an unpinned action, a hardcoded secret, and a 65 KB file changed in two places. `npm run eval` runs them and counts false PASSes.
+- `pr-check.yml` checks this repository's own pull requests with its rules file and keeps one comment on the pull request up to date.
+
+**Prompt:**
+
+> I'm getting a bunch of fail emails. Check it out.
+
+**What came out of it:** the fixture repository's own CI was failing on every pull request because its test script passed a directory to `node --test`, which Node reads as a module path. Fixed with a glob, verified locally on every branch, and pushed as a normal commit with the branches rebased, after a first attempt that rewrote the base branch closed all the pull requests.
+
+The first live run also hit the Workers AI Free plan's daily cap of 10,000 neurons, used up by the day's earlier runs. The run came back UNSURE on every rule with every file under "Not checked" and the model's error quoted, which is the designed failure mode: no false PASS. A rule interpretation that failed the same way had been cached under the rules' hash; the store now keeps a failed interpretation only as the workspace's rules and retries the model on the next save.

@@ -1,0 +1,13 @@
+{
+  "name": "near-duplicate",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/4",
+  "headSha": "8a0a2c6034a57540fca384dd9f39f747b997d0cb",
+  "status": "fail",
+  "rules": {
+    "1": "FAIL",
+    "2": "NA",
+    "3": "PASS",
+    "4": "PASS",
+    "5": "PASS"
+  }
+}

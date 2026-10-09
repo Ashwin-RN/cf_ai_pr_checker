@@ -15,6 +15,8 @@ const file: PrFile = {
     "@@ -1,3 +1,3 @@\n const a = 1;\n-console.log(a);\n+log(a);\n export { a };"
 };
 
+const content = "const a = 1;\nlog(a);\nexport { a };\n";
+
 function sequence(outputs: unknown[]) {
   const prompts: ChatMessage[][] = [];
   const call: JsonCaller = async (messages) => {
@@ -43,11 +45,14 @@ const firstPass = (quote: string) => ({
   warnings: []
 });
 
+const paths = new Set([file.path]);
+
 describe("checkFile verification", () => {
   it("does not accept a removed line as evidence that something is present", async () => {
     const { call, prompts } = sequence([firstPass("console.log(a);")]);
-    const result = await checkFile([rule(1)], file, new Set([file.path]), call);
+    const result = await checkFile([rule(1)], file, paths, call, content);
     expect(prompts).toHaveLength(1);
+    expect(prompts[0][1].content).toContain("-       | console.log(a);");
     expect(result.verdicts[0]).toMatchObject({
       verdict: "FAIL",
       verified: false,
@@ -61,14 +66,15 @@ describe("checkFile verification", () => {
       firstPass("log(a);"),
       { breaks_rule: false, reason: "log is not console.log" }
     ]);
-    const result = await checkFile([rule(1)], file, new Set([file.path]), call);
+    const result = await checkFile([rule(1)], file, paths, call, content);
     expect(prompts).toHaveLength(2);
     expect(prompts[1][1].content).toContain(">     2 | log(a);");
     expect(prompts[1][1].content).toContain("      1 | const a = 1;");
     expect(result.verdicts[0]).toMatchObject({
       verdict: "UNSURE",
       verified: true,
-      line: 2
+      line: 2,
+      origin: null
     });
     expect(result.verdicts[0].note).toContain("second look");
     expect(result.verdicts[0].question).toContain("rule 1");
@@ -79,7 +85,7 @@ describe("checkFile verification", () => {
       firstPass("log(a);"),
       { breaks_rule: true, reason: "it logs" }
     ]);
-    const result = await checkFile([rule(1)], file, new Set([file.path]), call);
+    const result = await checkFile([rule(1)], file, paths, call, content);
     expect(result.verdicts[0]).toMatchObject({
       verdict: "FAIL",
       verified: true,
@@ -90,11 +96,12 @@ describe("checkFile verification", () => {
   it("gives no second look to a FAIL that asserts absence", async () => {
     const { call, prompts } = sequence([firstPass("")]);
     const must = rule(1, "Has a log line", "must");
-    const result = await checkFile([must], file, new Set([file.path]), call);
+    const result = await checkFile([must], file, paths, call, content);
     expect(prompts).toHaveLength(1);
     expect(result.verdicts[0]).toMatchObject({
       verdict: "FAIL",
-      verified: true
+      verified: true,
+      origin: "introduced"
     });
   });
 });

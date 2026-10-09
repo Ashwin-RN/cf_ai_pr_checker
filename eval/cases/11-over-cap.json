@@ -1,0 +1,13 @@
+{
+  "name": "over-cap",
+  "prUrl": "https://github.com/Ashwin-RN/pr-check-fixtures/pull/5",
+  "headSha": "0338df662cbabb1710e0b2d812706fb89401f94b",
+  "status": "unsure",
+  "rules": {
+    "1": "UNSURE",
+    "2": "NA",
+    "3": "UNSURE",
+    "4": "UNSURE",
+    "5": "UNSURE"
+  }
+}

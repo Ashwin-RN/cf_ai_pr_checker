@@ -24,6 +24,7 @@ export function verdict(
     quote: null,
     line: null,
     verified: true,
+    origin: v === "FAIL" ? "introduced" : null,
     reason: "because",
     why: "",
     steps: [],
@@ -42,7 +43,9 @@ export function file(
   return {
     path,
     state: "checked",
+    coverage: "full",
     reason: null,
+    chunks: 1,
     purpose: "",
     verdicts,
     facts: [],
@@ -58,7 +61,7 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
     rule(2, "Has a test", "must")
   ];
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "check-1",
     workspace: "ws",
     pr: {
@@ -70,14 +73,25 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
       headSha: "abcdef1234567890"
     },
     rulesHash: "hash",
+    rulesSource: "the rules saved in this workspace",
     rules,
+    strict: false,
     status: "pass",
     ruleStatuses: rules.map((r) => ({
       rule: r.id,
       status: "PASS",
+      blocking: false,
       detail: "passes in 1 file"
     })),
     findings: [],
+    crossFile: [],
+    intent: {
+      compared: false,
+      summary: "The pull request has no description to compare.",
+      unmentioned: [],
+      unsupported: []
+    },
+    previous: null,
     files: [],
     notChecked: [],
     coverageComplete: true,

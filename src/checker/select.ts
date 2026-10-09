@@ -12,28 +12,34 @@ export function priority(path: string): number {
   return 0;
 }
 
-export type Selection = {
-  checked: PrFile[];
-  skipped: Skipped[];
-  coverageComplete: boolean;
-};
+// Stands in for the files past the page cap of the file list, which no
+// rule's scope can be matched against.
+export const MORE_FILES = "(more files)";
+
+export type Selection = { checked: PrFile[]; skipped: Skipped[] };
 
 export function selectFiles(files: PrFile[]): Selection {
   const skipped: Skipped[] = [];
-  let coverageComplete = true;
   const candidates: PrFile[] = [];
   for (const file of files) {
     if (limits.skipPaths.some((re) => re.test(file.path))) {
       skipped.push({
         path: file.path,
-        reason: "lockfile, generated, vendored or binary"
+        reason: "lockfile, generated, vendored or binary",
+        coverage: false
+      });
+    } else if (file.status === "removed") {
+      skipped.push({
+        path: file.path,
+        reason: "deleted by this pull request",
+        coverage: false
       });
     } else if (!file.patch) {
       skipped.push({
         path: file.path,
-        reason: "no diff available (binary or too large)"
+        reason: "no diff available (binary or too large)",
+        coverage: true
       });
-      coverageComplete = false;
     } else {
       candidates.push(file);
     }
@@ -46,9 +52,9 @@ export function selectFiles(files: PrFile[]): Selection {
   for (const file of ordered.slice(limits.filesPerCheck)) {
     skipped.push({
       path: file.path,
-      reason: `over the cap of ${limits.filesPerCheck} files per check`
+      reason: `over the cap of ${limits.filesPerCheck} files per check`,
+      coverage: true
     });
-    coverageComplete = false;
   }
-  return { checked, skipped, coverageComplete };
+  return { checked, skipped };
 }
