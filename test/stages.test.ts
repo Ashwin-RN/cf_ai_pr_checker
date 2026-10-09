@@ -131,11 +131,20 @@ describe("stages", () => {
     ).rejects.toMatchObject({ kind: "no_rules" });
   });
 
-  it("counts calls per caller", async () => {
-    const counted = countCalls(failing);
+  it("counts model calls per caller, retries included", async () => {
+    const retried: JsonCaller = async () => ({
+      ok: false,
+      error: "twice",
+      raw: null,
+      calls: 2
+    });
+    const counted = countCalls(retried);
     await counted.callJson([], null as never);
     await counted.callJson([], null as never);
-    expect(counted.calls()).toBe(2);
+    expect(counted.calls()).toBe(4);
+    const plain = countCalls(failing);
+    await plain.callJson([], null as never);
+    expect(plain.calls()).toBe(1);
   });
 
   it("snapshots progress so later changes do not leak into it", () => {

@@ -482,16 +482,18 @@ export function assemble(a: Assembly): CheckResult {
   };
 }
 
-// Counts the calls made through a caller, so each stage can report its share.
+// Counts the model calls made through a caller, retries included, so each
+// stage can report its share.
 export function countCalls(callJson: JsonCaller): {
   callJson: JsonCaller;
   calls: () => number;
 } {
   let n = 0;
   return {
-    callJson: (messages, schema) => {
-      n++;
-      return callJson(messages, schema);
+    callJson: async (messages, schema) => {
+      const result = await callJson(messages, schema);
+      n += result.calls ?? 1;
+      return result;
     },
     calls: () => n
   };

@@ -1,6 +1,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { isChatWorkspace, newChatWorkspace } from "./workspace";
 import type { UIMessage } from "ai";
 import type { ChatAgent } from "./server";
 import type { Progress, ProgressFile } from "./checker/types";
@@ -29,9 +30,9 @@ import {
 // One Durable Object per workspace. The id lives in the URL so the page can be
 // shared or reopened; a fresh visit gets a fresh id.
 function workspaceId(): string {
-  const match = /^\/w\/([a-z0-9]{20,})$/.exec(location.pathname);
-  if (match) return match[1];
-  const id = crypto.randomUUID().replaceAll("-", "");
+  const match = /^\/w\/([^/]+)$/.exec(location.pathname);
+  if (match && isChatWorkspace(match[1])) return match[1];
+  const id = newChatWorkspace();
   history.replaceState(null, "", `/w/${id}`);
   return id;
 }

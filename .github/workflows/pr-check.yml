@@ -2,10 +2,18 @@ name: PR check
 
 # Runs this repository's own checker against each pull request, using the
 # rules in pr-rules.md, and keeps one comment on the pull request up to date.
+# Drafts are left alone: a check spends a share of the day's model budget,
+# and a draft is pushed to often.
+#
+# Two status checks come out of it, so branch protection can require either.
+# "rules" fails when a rule fails on a line the pull request adds; "verified"
+# fails unless every rule was verified to pass. A check that did not run
+# fails both.
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -13,8 +21,11 @@ permissions:
 
 jobs:
   check:
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      status: ${{ steps.check.outputs.status }}
     env:
       CHECKER_URL: ${{ secrets.CHECKER_URL }}
       CHECKER_API_TOKEN: ${{ secrets.CHECKER_API_TOKEN }}
@@ -39,7 +50,13 @@ jobs:
           fi
           jq -r .report_markdown result.json > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
-          echo "status=$(jq -r .status result.json)" >> "$GITHUB_OUTPUT"
+          status=$(jq -r .status result.json)
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            pass) echo "::notice::Every rule passes on every checked file." ;;
+            unsure) echo "::warning::Not every rule could be verified. See Questions and Not checked in the report." ;;
+            fail) echo "::error::A rule fails on a line this pull request adds. See Blocking in the report." ;;
+          esac
 
       - if: steps.check.outcome == 'success' && env.SAME_REPO == 'true'
         env:
@@ -59,7 +76,38 @@ jobs:
             gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@comment.md > /dev/null
           fi
 
-      - if: steps.check.outputs.status == 'fail'
-        run: |
-          echo "::error::The pull request fails a rule. See the PR check comment or the job summary."
-          exit 1
+  # A skipped job counts as passing for a required check, so these two run
+  # whenever the check job did and read how it ended.
+  rules:
+    needs: check
+    if: always() && github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RESULT: ${{ needs.check.result }}
+      STATUS: ${{ needs.check.outputs.status }}
+    steps:
+      - run: |
+          case "$RESULT/$STATUS" in
+            success/) echo "::notice::Not checked: the checker is not configured." ;;
+            success/fail) echo "::error::A rule fails. See the PR check comment or the job summary."; exit 1 ;;
+            success/*) echo "No rule fails." ;;
+            *) echo "::error::The check did not run."; exit 1 ;;
+          esac
+
+  verified:
+    needs: check
+    if: always() && github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RESULT: ${{ needs.check.result }}
+      STATUS: ${{ needs.check.outputs.status }}
+    steps:
+      - run: |
+          case "$RESULT/$STATUS" in
+            success/) echo "::notice::Not checked: the checker is not configured." ;;
+            success/pass) echo "Every rule verified." ;;
+            success/*) echo "::error::Not every rule was verified to pass: the check ended $STATUS. See the PR check comment or the job summary."; exit 1 ;;
+            *) echo "::error::The check did not run."; exit 1 ;;
+          esac
