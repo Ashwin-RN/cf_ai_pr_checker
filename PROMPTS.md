@@ -120,3 +120,20 @@ Smoke-tested against this repository's own pull request #1, in the chat and over
 **What came out of it:** the fixture repository's own CI was failing on every pull request because its test script passed a directory to `node --test`, which Node reads as a module path. Fixed with a glob, verified locally on every branch, and pushed as a normal commit with the branches rebased, after a first attempt that rewrote the base branch closed all the pull requests.
 
 The first live run also hit the Workers AI Free plan's daily cap of 10,000 neurons, used up by the day's earlier runs. The run came back UNSURE on every rule with every file under "Not checked" and the model's error quoted, which is the designed failure mode: no false PASS. A rule interpretation that failed the same way had been cached under the rules' hash; the store now keeps a failed interpretation only as the workspace's rules and retries the model on the next save.
+
+## 2026-10-09: M3, the check as a Workflow
+
+**Prompt:**
+
+> nevermind testing things then. lets focus on getting stage 3 off the ground?
+
+**What came out of it:** the branch `m3-workflow`. Each check now runs as a Cloudflare Workflow.
+
+- The engine is split into four stages that both runners share: fetch and select, one per file, settle across files, assemble. Running them in one process gives the same result as running them as steps, and a test holds the two equal.
+- `CheckWorkflow` runs the stages as durable steps: `fetch-pr`, `resolve-rules`, one `check:<path>` per file with five in flight, `settle`, `finalise`. Rules resolve through the agent by RPC, since that path needs the store and the rules file. Every step hands its result to the agent by RPC before it returns, so a retry cannot write twice and a crash keeps the files already done. A failure the check owns, such as a missing rules file, is returned as data rather than thrown, so the step is not retried and the failure keeps its kind.
+- Step outputs are capped at 1 MiB, so the file list travels without its diffs and the selected diffs are trimmed to a budget; a file dropped for that is a named coverage gap. Raw model output goes to the store, never into a step output.
+- The agent starts the Workflow with the check id as the instance id, forwards progress to whoever is waiting, and takes the result when the last step stores it, with the stored row as the fallback and a deadline after which the Workflow is stopped. A chat check whose stream was lost to a restart still gets its report appended to the conversation once, and a reload mid-check was tested to land it once.
+- `CHECK_RUNNER=inline` keeps the one-process runner, and the JSON block names the runner a check used.
+- Tested locally under the exhausted model budget, which exercises every step with model errors as results, and on the deployed Worker, where the instance shows as completed.
+
+The Workers AI cap from the day before had not lifted at 03:00 UTC despite the documented midnight reset and zero usage for the day, which matches unanswered community threads; the evaluation run waits for it.

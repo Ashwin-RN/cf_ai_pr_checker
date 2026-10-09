@@ -137,6 +137,7 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
     pr: { url: r.pr.url, head_sha: r.pr.headSha, title: r.pr.title },
     rules_hash: r.rulesHash,
     rules_source: r.rulesSource,
+    runner: r.runner,
     rules: r.ruleStatuses.map((s) => {
       const rule = r.rules.find((x) => x.id === s.rule);
       return {
