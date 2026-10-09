@@ -95,6 +95,20 @@ describe("the MCP server", () => {
       prUrl: "https://github.com/o/r/pull/1",
       strict: true
     });
+    expect(seen[0].id).toMatch(/^[0-9a-f-]{36}$/);
+    // A client that names the check can find it again after a cut stream.
+    const named = await call(client, "check_pr", {
+      pr_url: "https://github.com/o/r/pull/1",
+      check_id: "agent-run-42"
+    });
+    expect(named.structuredContent).toMatchObject({ check_id: "agent-run-42" });
+    expect(seen[1].id).toBe("agent-run-42");
+    const bad = await call(client, "check_pr", {
+      pr_url: "https://github.com/o/r/pull/1",
+      check_id: "no spaces or _"
+    });
+    expect(bad.isError).toBe(true);
+    expect(seen).toHaveLength(2);
   });
 
   it("check_pr reports progress to a client that asks, then the report", async () => {

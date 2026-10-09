@@ -141,9 +141,16 @@ export function registerTools(
     {
       title: "Check a pull request",
       description:
-        "Runs the rules against a public GitHub pull request and returns the report: Status, Blocking, Questions, Warnings, Not checked, Intent. Work through Blocking, then Questions (answer_question when the rule is met in a way the check cannot see), then Warnings; push and run again. Rules come from pr-rules.md in the checked repository when it has one, else from this workspace; rules given here are used for this check and saved for the workspace. A check takes a minute or more and reports progress when asked for it; if the call is cut off, get_check with the check_id from the error returns the result once it is in.",
+        "Runs the rules against a public GitHub pull request and returns the report: Status, Blocking, Questions, Warnings, Not checked, Intent. Work through Blocking, then Questions (answer_question when the rule is met in a way the check cannot see), then Warnings; push and run again. Rules come from pr-rules.md in the checked repository when it has one, else from this workspace; rules given here are used for this check and saved for the workspace. A check takes a minute or more and reports progress when asked for it. The check keeps running if the call is cut off: give a check_id of your own and read it back with get_check, or find it with list_checks.",
       inputSchema: {
         pr_url: z.string().describe("https://github.com/owner/repo/pull/123"),
+        check_id: z
+          .string()
+          .regex(/^[0-9a-z][0-9a-z-]{7,63}$/i)
+          .optional()
+          .describe(
+            "Your own id for this check, so get_check can find it if this call is cut off. One is generated otherwise."
+          ),
         rules: z
           .array(z.string())
           .optional()
@@ -159,8 +166,8 @@ export function registerTools(
       },
       annotations: { readOnlyHint: false, openWorldHint: true }
     },
-    async ({ pr_url, rules, strict }, extra) => {
-      const id = crypto.randomUUID();
+    async ({ pr_url, check_id, rules, strict }, extra) => {
+      const id = check_id ?? crypto.randomUUID();
       const out = await withProgress(
         ws.check(id, pr_url, { rules, strict }),
         () => ws.progress(id),

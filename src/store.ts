@@ -148,10 +148,11 @@ export class Store {
   }
 
   // The id a caller gave, or the one check it is a prefix of. The chat shows
-  // eight characters of an id, which is enough to name it.
+  // eight characters of an id, which is enough to name it. Ids are letters,
+  // digits and dashes, so the LIKE below has no wildcard to meet.
   findCheckId(idOrPrefix: string): string | null {
     const given = idOrPrefix.trim();
-    if (!/^[\w-]{4,}$/.test(given)) return null;
+    if (!/^[0-9a-z-]{4,}$/i.test(given)) return null;
     const rows = this.sql<{ id: string }>`
       SELECT id FROM checks WHERE id = ${given} OR id LIKE ${`${given}%`} LIMIT 2`;
     if (rows.some((r) => r.id === given)) return given;
