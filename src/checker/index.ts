@@ -476,22 +476,26 @@ export function assemble(a: Assembly): CheckResult {
     coverageComplete:
       notChecked.every((n) => !n.coverage) &&
       results.every((r) => r.state === "checked" && r.coverage === "full"),
-    modelCalls: a.modelCalls,
+    // The rules were interpreted before the stages ran, so their calls
+    // arrive on the set.
+    modelCalls: a.modelCalls + (ruleSet.calls ?? 0),
     startedAt: a.startedAt,
     finishedAt: a.finishedAt
   };
 }
 
-// Counts the calls made through a caller, so each stage can report its share.
+// Counts the model calls made through a caller, retries included, so each
+// stage can report its share.
 export function countCalls(callJson: JsonCaller): {
   callJson: JsonCaller;
   calls: () => number;
 } {
   let n = 0;
   return {
-    callJson: (messages, schema) => {
-      n++;
-      return callJson(messages, schema);
+    callJson: async (messages, schema) => {
+      const result = await callJson(messages, schema);
+      n += result.calls ?? 1;
+      return result;
     },
     calls: () => n
   };

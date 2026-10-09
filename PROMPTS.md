@@ -137,3 +137,35 @@ The first live run also hit the Workers AI Free plan's daily cap of 10,000 neuro
 - Tested locally under the exhausted model budget, which exercises every step with model errors as results, and on the deployed Worker, where the instance shows as completed.
 
 The Workers AI cap from the day before had not lifted at 03:00 UTC despite the documented midnight reset and zero usage for the day, which matches unanswered community threads; the evaluation run waits for it.
+
+## 2026-10-09: Trust, part one: the harness
+
+**Prompt:**
+
+> [a pasted review of the repository at `ffb822a`] this is a report of our repo so far... what do you think? lets make a plan to address the concerns you agree with.
+
+**What came out of it:** every finding in the review was checked against the code, and all seven held: the chat transport could open any workspace name, including the API's; four paths in the merge could end in PASS without the evidence for it; a rule's directory scope accepted an invented parent directory; a big file cut into windows counted as fully covered; a finding whose file was not checked this run counted as resolved; the evaluation runner exited green on an error; and cross-file verdicts rest on model summaries. The plan is two pull requests: the harness first, so a green result can be trusted to mean what it says, then the verdict core.
+
+**Prompt:**
+
+> I accept your recommendation on one. Uh, same on two as well. Let's not push the draft. I don't know what the best approach for CI is. I think maybe we should fail on unsure. I'm not sure. Um, you would be able to tell me what's better for that.
+
+**What came out of it:** the branch `trust-harness`.
+
+- API workspaces are a name space of their own. The Worker opens them under a prefix no chat id can carry, and the chat transport admits only the page's own id shape through the router's `onBeforeConnect` and `onBeforeRequest` hooks; any other name gets a 404 before it reaches a Durable Object. Checked live on a local server: `ci` and `api:ci` are refused on the chat path, and the API still reaches `ci` with the token.
+- `modelCalls` now counts model runs, validation retries and capacity backoffs included; each answer from the model caller says how many runs it took.
+- The evaluation runner scores through `eval/score.ts`, which has its own tests, and exits non-zero on any case it could not score: an error from the checker, a rule missing from the answer, or a fixture whose head has moved. Before, such a run exited green.
+- `pr-check.yml` skips drafts, since a push to a draft is frequent and each check spends a share of the day's model budget. It now ends in two status checks, `rules` and `verified`, so branch protection can require a failing rule to block, or require every rule to be verified; `unsure` is red on the second. A skipped job counts as passing for a required check, so both run whenever the check job did and read how it ended.
+- A `.gitattributes` keeps the working tree on LF, which ends the format check failing on a Windows checkout.
+
+**Prompt:**
+
+> [a second review, pasted without comment, of the commit `d750cea`]
+
+**What came out of it:** five more changes on the same branch, since the review found the harness not yet honest in five places.
+
+- The `verified` status check read only the overall status, which a pre-existing failure beside a file over the cap can leave at pass. It now reads the JSON block: every changed file checked, no rule FAIL anywhere, and it is red when the checker is not configured, since nothing was verified then.
+- The evaluation scores the overall status and the blocking policy in their own right: a check that should fail or stay unsure but passes, or a rule that should block and does not, is a false PASS even when every rule verdict was right. One cause counts once.
+- The model call that interprets the rules happens before the stages and was not counted; the count now travels on the rule set, so a check that interpreted its rules reports one call more than one that read them from the cache.
+- `--only` that matches no case is an error, not a green run over nothing.
+- The README says that a deployment upgraded across the name-space change starts its API workspaces empty, and that pull requests from forks are not checked, since secrets are not available to them.

@@ -32,7 +32,12 @@ describe("jsonCaller", () => {
   it("validates a parsed object and sends the schema as JSON Mode", async () => {
     const { run, calls } = runner([{ response: { a: 1 } }]);
     const out = await jsonCaller(run)(messages, schema);
-    expect(out).toEqual({ ok: true, value: { a: 1 }, raw: '{"a":1}' });
+    expect(out).toEqual({
+      ok: true,
+      value: { a: 1 },
+      raw: '{"a":1}',
+      calls: 1
+    });
     expect(calls[0].format).toMatchObject({ type: "json_schema" });
     const js = calls[0].format!.json_schema as Record<string, unknown>;
     expect(js).not.toHaveProperty("$schema");
@@ -45,7 +50,7 @@ describe("jsonCaller", () => {
       { response: '{"a": 2}' }
     ]);
     const out = await jsonCaller(run)(messages, schema);
-    expect(out).toMatchObject({ ok: true, value: { a: 2 } });
+    expect(out).toMatchObject({ ok: true, value: { a: 2 }, calls: 2 });
     expect(calls).toHaveLength(2);
     expect(calls[1].messages[1]).toEqual({
       role: "assistant",
@@ -57,7 +62,7 @@ describe("jsonCaller", () => {
   it("gives up after the retry and keeps the raw output", async () => {
     const { run } = runner([{ response: "nope" }, { response: "still nope" }]);
     const out = await jsonCaller(run)(messages, schema);
-    expect(out).toMatchObject({ ok: false, raw: "still nope" });
+    expect(out).toMatchObject({ ok: false, raw: "still nope", calls: 2 });
     expect((out as { error: string }).error).toMatch(/^invalid output/);
   });
 
@@ -74,7 +79,12 @@ describe("jsonCaller", () => {
   it("reports model errors without retrying", async () => {
     const { run, calls } = runner([new Error("boom")]);
     const out = await jsonCaller(run)(messages, schema);
-    expect(out).toEqual({ ok: false, error: "model error: boom", raw: null });
+    expect(out).toEqual({
+      ok: false,
+      error: "model error: boom",
+      raw: null,
+      calls: 1
+    });
     expect(calls).toHaveLength(1);
   });
 

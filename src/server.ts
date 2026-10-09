@@ -5,7 +5,7 @@ import {
   createUIMessageStreamResponse,
   type UIMessage
 } from "ai";
-import { CheckError, type CheckInput, runCheck } from "./checker";
+import { CheckError, type CheckInput, countCalls, runCheck } from "./checker";
 import {
   GithubError,
   canonicalPrUrl,
@@ -34,6 +34,12 @@ import type {
 import { Store, type Sql } from "./store";
 import type { CheckParams, RulesLookup } from "./workflow";
 import { streamChatResponse, toChatMessages } from "./workers-ai";
+import {
+  apiInstance,
+  isApiWorkspace,
+  isChatWorkspace,
+  workspaceOf
+} from "./workspace";
 
 export { CheckWorkflow } from "./workflow";
 
@@ -51,7 +57,6 @@ export type AppEnv = Env & {
 export type CheckMessage = UIMessage<unknown, { check: Progress }>;
 
 const RULES_FILE = "pr-rules.md";
-const WORKSPACE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const CHAT_HISTORY = 12;
 const CHAT_MESSAGE_CHARS = 4_000;
 
@@ -380,8 +385,14 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     const hash = await hashTexts(texts);
     const known = this.store.getRuleSet(hash);
     if (known) return { set: { ...known, source }, interpreted: true };
-    const rules = await interpretRules(texts, this.callJson());
-    const set = { rules: rules ?? defaultRules(texts), hash, source };
+    const counted = countCalls(this.callJson());
+    const rules = await interpretRules(texts, counted.callJson);
+    const set = {
+      rules: rules ?? defaultRules(texts),
+      hash,
+      source,
+      calls: counted.calls()
+    };
     if (rules) this.store.putRuleSet(set);
     return { set, interpreted: rules !== null };
   }
@@ -521,7 +532,7 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     const canonical = canonicalPrUrl(ref);
     const input: CheckInput = {
       id,
-      workspace: this.name,
+      workspace: workspaceOf(this.name),
       prUrl: canonical,
       rules: options.rules ?? null,
       strict: options.strict ?? false,
@@ -626,6 +637,7 @@ function sameToken(given: string, expected: string): boolean {
 }
 
 // Bearer token, then hand the request to the workspace's Durable Object.
+// API workspaces live in their own name space, apart from the chat's.
 async function handleApi(request: Request, env: AppEnv): Promise<Response> {
   if (!env.API_TOKEN) {
     return json(
@@ -649,13 +661,13 @@ async function handleApi(request: Request, env: AppEnv): Promise<Response> {
       return json({ error: "Body must be JSON." }, 400);
     }
   }
-  if (!WORKSPACE.test(workspace)) {
+  if (!isApiWorkspace(workspace)) {
     return json(
       { error: "workspace must be lowercase letters, digits and dashes." },
       400
     );
   }
-  const agent = await getAgentByName(env.ChatAgent, workspace);
+  const agent = await getAgentByName(env.ChatAgent, apiInstance(workspace));
   return agent.fetch(
     new Request(request.url, {
       method: request.method,
@@ -665,14 +677,27 @@ async function handleApi(request: Request, env: AppEnv): Promise<Response> {
   );
 }
 
+// The chat transport opens chat workspaces only, so an API workspace cannot
+// be reached by naming it.
+function chatOnly(
+  _request: Request,
+  lobby: { name: string }
+): Response | undefined {
+  return isChatWorkspace(lobby.name)
+    ? undefined
+    : new Response("Not found", { status: 404 });
+}
+
 export default {
   async fetch(request: Request, env: AppEnv) {
     if (new URL(request.url).pathname.startsWith("/api/")) {
       return handleApi(request, env);
     }
     return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
+      (await routeAgentRequest(request, env, {
+        onBeforeConnect: chatOnly,
+        onBeforeRequest: chatOnly
+      })) || new Response("Not found", { status: 404 })
     );
   }
 } satisfies ExportedHandler<AppEnv>;

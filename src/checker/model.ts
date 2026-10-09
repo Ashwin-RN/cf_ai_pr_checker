@@ -6,9 +6,12 @@ export type ChatMessage = {
   content: string;
 };
 
+// `calls` is how many times the model ran for this answer, validation
+// retries and capacity backoffs included. A caller that does not count
+// leaves it out, and one is assumed.
 export type JsonResult<T> =
-  | { ok: true; value: T; raw: string }
-  | { ok: false; error: string; raw: string | null };
+  | { ok: true; value: T; raw: string; calls?: number }
+  | { ok: false; error: string; raw: string | null; calls?: number };
 
 export type JsonCaller = <T>(
   messages: ChatMessage[],
@@ -83,28 +86,36 @@ export function jsonCaller(run: TextModel, onCall?: () => void): JsonCaller {
     const format = { type: "json_schema", json_schema: jsonSchemaOf(schema) };
     let conversation = messages;
     let raw: string | null = null;
+    let calls = 0;
+    const count = () => {
+      calls++;
+      onCall?.();
+    };
     for (let attempt = 0; attempt <= limits.modelRetries; attempt++) {
       let output: unknown;
       try {
-        output = await runWithBackoff(run, conversation, format, onCall);
+        output = await runWithBackoff(run, conversation, format, count);
       } catch (e) {
         return {
           ok: false,
           error: `model error: ${(e as Error).message}`,
-          raw
+          raw,
+          calls
         };
       }
       raw = rawTextOf(output);
       let error: string;
       try {
         const parsed = schema.safeParse(parseJson(raw));
-        if (parsed.success) return { ok: true, value: parsed.data, raw };
+        if (parsed.success) {
+          return { ok: true, value: parsed.data, raw, calls };
+        }
         error = issues(parsed.error);
       } catch (e) {
         error = (e as Error).message;
       }
       if (attempt === limits.modelRetries) {
-        return { ok: false, error: `invalid output: ${error}`, raw };
+        return { ok: false, error: `invalid output: ${error}`, raw, calls };
       }
       conversation = [
         ...messages,
@@ -115,7 +126,7 @@ export function jsonCaller(run: TextModel, onCall?: () => void): JsonCaller {
         }
       ];
     }
-    return { ok: false, error: "unreachable", raw };
+    return { ok: false, error: "unreachable", raw, calls };
   };
 }
 
