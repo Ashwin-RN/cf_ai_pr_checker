@@ -1,8 +1,13 @@
-import { diffRun } from "./diff";
+import { assessedBy, diffRun } from "./diff";
 import { GithubError, fetchPr, fetchRawFile, parsePrUrl } from "./github";
 import { checkIntent } from "./intent";
 import { limits } from "./limits";
-import { buildFindings, overallStatus, ruleStatuses } from "./merge";
+import {
+  buildFindings,
+  gateCrossFile,
+  overallStatus,
+  ruleStatuses
+} from "./merge";
 import type { JsonCaller } from "./model";
 import {
   confirmPrompt,
@@ -13,7 +18,7 @@ import {
 } from "./prompts";
 import { ruleApplies } from "./rules";
 import { MORE_FILES, selectFiles } from "./select";
-import { collectFacts, settleCrossFile } from "./settle";
+import { collectFacts, factsCut, settleCrossFile } from "./settle";
 import type {
   CheckResult,
   CrossFileVerdict,
@@ -120,9 +125,11 @@ function verdictFrom(
   const settled = v.verdict === "FAIL" || v.verdict === "UNSURE";
   let note: string | null = null;
   if (needsQuote && !present) {
-    note = quoted
-      ? "the quoted line is removed by this PR"
-      : "the quote was not found in the file";
+    note = !v.quote.trim()
+      ? "no line was quoted"
+      : quoted
+        ? "the quoted line is removed by this PR"
+        : "the quote was not found in the file";
   }
   return {
     rule: rule.id,
@@ -150,6 +157,24 @@ function verdictFrom(
     resolution: settled && v.resolution.trim() ? v.resolution.trim() : null,
     question:
       v.verdict === "UNSURE" && v.question.trim() ? v.question.trim() : null
+  };
+}
+
+// The model answered without a verdict for this rule. Silence is not a pass.
+function noVerdict(rule: Rule, path: string): FileVerdict {
+  return {
+    rule: rule.id,
+    verdict: "UNSURE",
+    quote: null,
+    line: null,
+    verified: true,
+    origin: null,
+    reason: "the model returned no verdict for this rule",
+    why: "",
+    steps: [],
+    resolution: null,
+    question: `Does ${path} meet rule ${rule.id}? The check returned no verdict for it.`,
+    note: null
   };
 }
 
@@ -201,7 +226,7 @@ export async function checkFile(
     content === null
       ? parseHunks(file.patch ?? "")
       : fileLines(content, file.patch ?? "");
-  const { chunks, cut } = chunkLines(lines);
+  const { chunks, cut, windowed } = chunkLines(lines);
   const outputs: Array<{ out: FileOutput; lines: HunkLine[] }> = [];
   const raws: string[] = [];
   let lastError: string | null = null;
@@ -214,7 +239,7 @@ export async function checkFile(
         rendered.text,
         content === null
           ? "diff"
-          : chunks.length > 1
+          : windowed
             ? { index: i, total: chunks.length }
             : "whole"
       ),
@@ -245,8 +270,11 @@ export async function checkFile(
       const v = out.verdicts.find((x) => x.rule === rule.id);
       return v ? [verdictFrom(rule, v, shown, allPaths, file.path)] : [];
     });
-    if (!candidates.length) continue;
-    verdicts.push(candidates.sort((a, b) => rank(b) - rank(a))[0]);
+    verdicts.push(
+      candidates.length
+        ? candidates.sort((a, b) => rank(b) - rank(a))[0]
+        : noVerdict(rule, file.path)
+    );
   }
   await secondLook(active, file, lines, verdicts, callJson);
   const shown = new Set(lines.map((l) => l.line));
@@ -259,7 +287,12 @@ export async function checkFile(
   return {
     ...base,
     state: "checked",
-    coverage: content === null || cut || failed ? "partial" : "full",
+    coverage:
+      content === null || cut || failed
+        ? "partial"
+        : windowed
+          ? "changes"
+          : "full",
     reason: reasons.length ? reasons.join("; ") : null,
     chunks: chunks.length,
     purpose: outputs.map((o) => o.out.purpose.trim()).find(Boolean) ?? "",
@@ -432,21 +465,30 @@ export type Assembly = {
   finishedAt: number;
 };
 
-// Stage 4: merge per rule, diff against the last run, shape the result. Pure.
+// Stage 4: gate the cross-file verdicts, merge per rule, diff against the
+// last run, shape the result. Pure.
 export function assemble(a: Assembly): CheckResult {
   const { input, pr, ruleSet, results, notChecked, crossFile, intent } = a;
   const strict = input.strict ?? false;
+  const gated = gateCrossFile(
+    ruleSet.rules,
+    crossFile,
+    results,
+    notChecked,
+    factsCut(pr, results)
+  );
   const statuses = ruleStatuses(
     ruleSet.rules,
     results,
     notChecked,
-    crossFile,
+    gated,
     strict
   );
   const diffed = diffRun(
     input.previous ?? null,
-    buildFindings(ruleSet.rules, results, crossFile, intent),
-    ruleSet.hash
+    buildFindings(ruleSet.rules, results, gated, intent),
+    ruleSet.hash,
+    assessedBy(ruleSet.rules, results, gated, intent)
   );
   return {
     schemaVersion: 2,
@@ -468,14 +510,14 @@ export function assemble(a: Assembly): CheckResult {
     status: overallStatus(statuses),
     ruleStatuses: statuses,
     findings: diffed.findings,
-    crossFile,
+    crossFile: gated,
     intent,
     previous: diffed.previous,
     files: results,
     notChecked,
-    coverageComplete:
-      notChecked.every((n) => !n.coverage) &&
-      results.every((r) => r.state === "checked" && r.coverage === "full"),
+    // Complete when no rule has a file in its scope the check did not cover
+    // for it; a skipped file no rule needed is not a gap.
+    coverageComplete: statuses.every((s) => s.complete),
     // The rules were interpreted before the stages ran, so their calls
     // arrive on the set.
     modelCalls: a.modelCalls + (ruleSet.calls ?? 0),

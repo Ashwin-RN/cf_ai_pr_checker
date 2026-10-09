@@ -111,12 +111,17 @@ describe("chunkLines", () => {
   );
 
   it("keeps a file that fits whole", () => {
-    expect(chunkLines(lines)).toEqual({ chunks: [lines], cut: false });
+    expect(chunkLines(lines)).toEqual({
+      chunks: [lines],
+      cut: false,
+      windowed: false
+    });
   });
 
   it("cuts a big file into windows around its changes and merges neighbours", () => {
-    const { chunks, cut } = chunkLines(big, 10_000, 30, 6);
+    const { chunks, cut, windowed } = chunkLines(big, 10_000, 30, 6);
     expect(cut).toBe(false);
+    expect(windowed).toBe(true);
     expect(chunks.map((c) => [c[0].line, c[c.length - 1].line])).toEqual([
       [71, 181],
       [771, 831]

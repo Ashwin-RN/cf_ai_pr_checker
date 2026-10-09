@@ -157,6 +157,7 @@ export class Store {
         id: f.id,
         key: f.key,
         kind: f.kind,
+        rule: f.rule,
         path: f.path,
         summary: f.summary
       }))

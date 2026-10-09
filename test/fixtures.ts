@@ -82,6 +82,7 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
       rule: r.id,
       status: "PASS",
       blocking: false,
+      complete: true,
       detail: "passes in 1 file"
     })),
     findings: [],

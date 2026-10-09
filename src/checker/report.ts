@@ -53,7 +53,9 @@ function statusLine(r: CheckResult): string {
   const failing = r.ruleStatuses.filter((s) => s.status === "FAIL");
   const blocking = failing.filter((s) => s.blocking).length;
   const preExisting = failing.length - blocking;
-  const unsure = r.ruleStatuses.filter((s) => s.status === "UNSURE").length;
+  const unsure = r.ruleStatuses.filter(
+    (s) => s.status === "UNSURE" || !s.complete
+  ).length;
   const total = r.rules.length;
   const onAdded = r.strict ? "" : " on lines this pull request adds";
   const notes: string[] = [];
@@ -63,7 +65,9 @@ function statusLine(r: CheckResult): string {
     );
   }
   if (unsure && r.status !== "unsure") {
-    notes.push(`${unsure} need${unsure === 1 ? "s" : ""} an answer.`);
+    notes.push(
+      `${unsure} need${unsure === 1 ? "s" : ""} an answer or more coverage.`
+    );
   }
   const rest = notes.length ? ` ${notes.join(" ")}` : "";
   if (r.status === "fail") {
@@ -80,11 +84,14 @@ function statusLine(r: CheckResult): string {
 function previousLine(r: CheckResult): string | null {
   const p = r.previous;
   if (!p) return null;
-  const resolved = p.resolved.length
-    ? ` (${p.resolved.map((f) => `${f.id} \`${f.key}\` ${f.path}`).join(", ")})`
+  const list = (fs: typeof p.resolved) =>
+    fs.map((f) => `${f.id} \`${f.key}\` ${f.path}`).join(", ");
+  const resolved = p.resolved.length ? ` (${list(p.resolved)})` : "";
+  const unassessed = p.unassessed.length
+    ? `, ${p.unassessed.length} not assessed (${list(p.unassessed)}; not checked again this run)`
     : "";
   const rules = p.rulesChanged ? " The rules changed since then." : "";
-  return `Since the last check at \`${p.headSha.slice(0, 7)}\`: ${p.new} new, ${p.open} still open, ${p.resolved.length} resolved${resolved}.${rules}`;
+  return `Since the last check at \`${p.headSha.slice(0, 7)}\`: ${p.new} new, ${p.open} still open, ${p.resolved.length} resolved${resolved}${unassessed}.${rules}`;
 }
 
 function statusCell(s: RuleStatus): string {
@@ -104,7 +111,8 @@ function ruleTable(r: CheckResult): string {
   ].join("\n");
 }
 
-// Files left out, files the model could not check, and files checked in part.
+// Files left out, files the model could not check, files checked in part,
+// and files checked around their changes only.
 function notCheckedSection(r: CheckResult): string {
   const lines = r.notChecked.map((n) => `- \`${n.path}\`: ${n.reason}`);
   for (const f of r.files) {
@@ -112,6 +120,10 @@ function notCheckedSection(r: CheckResult): string {
       lines.push(`- \`${f.path}\`: not checked, ${f.reason}`);
     } else if (f.coverage === "partial") {
       lines.push(`- \`${f.path}\`: partially checked, ${f.reason}`);
+    } else if (f.coverage === "changes") {
+      lines.push(
+        `- \`${f.path}\`: checked around its changes in ${plural(f.chunks, "part")}; the rest of the file was not shown`
+      );
     }
   }
   return lines.length ? `${lines.join("\n")}\n` : "none\n";
@@ -148,6 +160,7 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
         applies_to: rule?.appliesTo ?? null,
         status: s.status,
         blocking: s.blocking,
+        complete: s.complete,
         detail: s.detail
       };
     }),

@@ -143,7 +143,7 @@ export const settleSchema = z.object({
 
 export type SettleOutput = z.infer<typeof settleSchema>;
 
-const SETTLE_SYSTEM = `You settle pull request rules that no single file can decide. You do not see code. You see numbered facts: the list of changed files, and what each checked file does, as reported by a separate check of that file. Each checked file could not settle these rules alone; its open question is listed.
+const SETTLE_SYSTEM = `You settle pull request rules that no single file can decide. You do not see code. You see numbered facts: the list of changed files, and what each checked file does, as reported by a separate check of that file. Each checked file's own view of these rules is listed as an open point: a question it could not settle alone, or a fail it saw without the other files. Weigh an open point against the facts; a file cannot see what another file supplies.
 
 For each rule return exactly one verdict and cite the facts it rests on by number:
 - PASS: the facts show the requirement is met for every change it applies to. Cite the facts that show the requirement and the facts that show it being met.
@@ -173,7 +173,7 @@ ${ruleLines.join("\n")}
 Facts:
 ${factLines.join("\n")}
 
-Open questions from the per-file checks:
+Open points from the per-file checks:
 ${openLines.join("\n")}`
     }
   ];

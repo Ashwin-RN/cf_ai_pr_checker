@@ -57,6 +57,16 @@ describe("scopeFrom", () => {
     ).toEqual(["src/routes/"]);
     expect(scopeFrom(["srcx/**"], "Only src matters")).toBeNull();
   });
+
+  it("needs every directory on the path named, not only the last", () => {
+    expect(
+      scopeFrom(["invented/src/**"], "No console.log under src/")
+    ).toBeNull();
+    expect(scopeFrom(["src/routes/*.ts"], "Routes in src/ have tests")).toEqual(
+      ["src/routes/"]
+    );
+    expect(scopeFrom(["src/routes/*.ts"], "Every route has a test")).toBeNull();
+  });
 });
 
 describe("ruleApplies", () => {
