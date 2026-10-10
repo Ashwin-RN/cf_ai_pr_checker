@@ -8,6 +8,13 @@ import { stableKey } from "./checker/merge";
 
 export const CHAT_WORKSPACE = /^[a-z0-9]{20,}$/;
 export const API_WORKSPACE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// The id a caller may give its check over the API or MCP, so the check can
+// be found again if the call is cut off.
+export const CHECK_ID = /^[0-9a-z][0-9a-z-]{7,63}$/i;
+
+export function isCheckId(id: string): boolean {
+  return CHECK_ID.test(id);
+}
 
 const API_PREFIX = "api:";
 

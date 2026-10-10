@@ -40,26 +40,77 @@ if (cases.length === 0) {
   process.exit(1);
 }
 
+type Answer = { ok: boolean; status: number; out: Out | null };
+
+const headers = {
+  authorization: `Bearer ${token}`,
+  "content-type": "application/json"
+};
+
+// A check can outlast the connection: Node's fetch gives up on a response
+// after five minutes, and a proxy may give up sooner. The check keeps
+// running under the id the runner gave it, so the runner reads it back.
+const pollMs = 5_000;
+const pollForMs = 15 * 60_000;
+
+async function readBack(checkId: string): Promise<Answer> {
+  const until = Date.now() + pollForMs;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const res = await fetch(
+      `${url}/api/checks/${checkId}?workspace=${encodeURIComponent(workspace)}`,
+      { headers }
+    ).catch(() => null);
+    if (!res) continue;
+    if (res.status === 202) continue;
+    const out = (await res.json().catch(() => null)) as Out | null;
+    return { ok: res.ok, status: res.status, out };
+  }
+  return {
+    ok: false,
+    status: 0,
+    out: { error: "the check did not finish" } as Out
+  };
+}
+
 async function runCase(c: Case): Promise<Row> {
   const started = Date.now();
-  const res = await fetch(`${url}/api/check`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      prUrl: c.prUrl,
-      workspace,
-      strict: c.strict ?? false
-    })
-  });
-  const seconds = Math.round((Date.now() - started) / 100) / 10;
-  const out = (await res.json().catch(() => null)) as Out | null;
-  if (outDir && out) {
-    writeFileSync(join(outDir, `${c.name}.json`), JSON.stringify(out, null, 2));
+  const checkId = `eval-${c.name}-${started.toString(36)}`;
+  let answer: Answer;
+  try {
+    const res = await fetch(`${url}/api/check`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        prUrl: c.prUrl,
+        workspace,
+        strict: c.strict ?? false,
+        checkId
+      })
+    });
+    const out = (await res.json().catch(() => null)) as Out | null;
+    // A non-JSON failure is the connection, not the checker.
+    answer =
+      !res.ok && !out
+        ? await readBack(checkId)
+        : { ok: res.ok, status: res.status, out };
+  } catch {
+    process.stderr.write("connection lost, reading back... ");
+    answer = await readBack(checkId);
   }
-  return score(c, { ok: res.ok, status: res.status }, out, seconds);
+  const seconds = Math.round((Date.now() - started) / 100) / 10;
+  if (outDir && answer.out) {
+    writeFileSync(
+      join(outDir, `${c.name}.json`),
+      JSON.stringify(answer.out, null, 2)
+    );
+  }
+  return score(
+    c,
+    { ok: answer.ok, status: answer.status },
+    answer.out,
+    seconds
+  );
 }
 
 const rows: Row[] = [];

@@ -104,6 +104,31 @@ describe("checkFile", () => {
     expect(result).toMatchObject({ coverage: "full", chunks: 1, reason: null });
   });
 
+  it("numbers the rules it lists 1 to N and maps each verdict back to the rule's id", async () => {
+    // Rule 1 is out of scope, so the model sees rules 2 and 3 as "1." and
+    // "2." and answers by those numbers; a list with a gap in its numbers
+    // made the model close the gap and shift every verdict after it.
+    const rules = [
+      { ...rule(1, "Workflows pin versions"), appliesTo: [".github/"] },
+      { ...rule(2, "No console.log"), appliesTo: ["src/"] },
+      rule(3, "No TODO without a link")
+    ];
+    const { call, prompts } = caller(
+      output([v(1, "FAIL", "console.log(a);"), v(2, "PASS")])
+    );
+    const result = await checkFile(rules, file, paths, call, content);
+    const user = prompts[0][1].content;
+    expect(user).toContain("1. [must not] No console.log");
+    expect(user).toContain("2. [must not] No TODO without a link");
+    expect(user).not.toContain("3. [");
+    expect(result.verdicts.map((x) => [x.rule, x.verdict])).toEqual([
+      [1, "NA"],
+      [2, "FAIL"],
+      [3, "PASS"]
+    ]);
+    expect(result.verdicts[1]).toMatchObject({ line: 2, verified: true });
+  });
+
   it("labels a FAIL on an unchanged line as pre-existing", async () => {
     const old: PrFile = {
       ...file,

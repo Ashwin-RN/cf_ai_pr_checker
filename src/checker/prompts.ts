@@ -60,7 +60,7 @@ Does the flagged line break the rule?`
 
 const FILE_SYSTEM = `You check one file from a GitHub pull request against numbered rules. A program verifies your quotes and merges results across files. Report only what this file shows.
 
-For each rule return exactly one verdict:
+For each rule, in the order listed, return exactly one verdict, with rule set to the rule's number as listed:
 - PASS: this file shows the rule is satisfied.
 - FAIL: this file shows the rule is broken.
 - UNSURE: this file is relevant but cannot settle the rule alone, or the deciding code is in another file.
@@ -83,10 +83,14 @@ export function filePrompt(
   content: string,
   view: "whole" | "diff" | { index: number; total: number } = "whole"
 ): ChatMessage[] {
-  const ruleLines = rules.map((r) => {
+  // Rules are numbered as listed, 1 to N, not by their ids: a file sees only
+  // the rules that apply to its path, and a model given a list with gaps in
+  // its numbers tends to close the gaps and shift every verdict after one.
+  // checkFile maps the numbers back to ids.
+  const ruleLines = rules.map((r, i) => {
     const tags = [r.polarity === "must_not" ? "must not" : "must"];
     if (r.scope === "cross_file") tags.push("may depend on other files");
-    return `${r.id}. [${tags.join(", ")}] ${r.text}`;
+    return `${i + 1}. [${tags.join(", ")}] ${r.text}`;
   });
   const rename = file.previousPath ? `, renamed from ${file.previousPath}` : "";
   const shown =
@@ -145,7 +149,7 @@ export type SettleOutput = z.infer<typeof settleSchema>;
 
 const SETTLE_SYSTEM = `You settle pull request rules that no single file can decide. You do not see code. You see numbered facts: the list of changed files, and what each checked file does, as reported by a separate check of that file. Each checked file's own view of these rules is listed as an open point: a question it could not settle alone, or a fail it saw without the other files. Weigh an open point against the facts; a file cannot see what another file supplies.
 
-For each rule return exactly one verdict and cite the facts it rests on by number:
+For each rule, in the order listed, return exactly one verdict, with rule set to the rule's number as listed, and cite the facts it rests on by number:
 - PASS: the facts show the requirement is met for every change it applies to. Cite the facts that show the requirement and the facts that show it being met.
 - FAIL: a fact shows a change the rule applies to, and no fact shows what the rule requires for it. Cite the fact that triggers the rule.
 - UNSURE: the facts do not settle it. Fill in question with the one question whose answer would.
@@ -158,10 +162,12 @@ export function settlePrompt(
   facts: Fact[],
   open: Array<{ rule: number; path: string; question: string }>
 ): ChatMessage[] {
-  const ruleLines = rules.map((r) => `${r.id}. ${r.text}`);
+  // Numbered as listed, like the file prompt; settleCrossFile maps back.
+  const ruleLines = rules.map((r, i) => `${i + 1}. ${r.text}`);
+  const listed = (id: number) => rules.findIndex((r) => r.id === id) + 1;
   const factLines = facts.map((f) => `[${f.index}] ${f.text}`);
   const openLines = open.length
-    ? open.map((o) => `- rule ${o.rule}, ${o.path}: ${o.question}`)
+    ? open.map((o) => `- rule ${listed(o.rule)}, ${o.path}: ${o.question}`)
     : ["- none"];
   return [
     { role: "system", content: SETTLE_SYSTEM },

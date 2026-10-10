@@ -282,11 +282,13 @@ export async function checkFile(
     };
   }
   const verdicts: FileVerdict[] = [...outOfScope];
-  for (const rule of active) {
+  for (const [at, rule] of active.entries()) {
+    // The prompt numbers the rules it lists 1 to N (see filePrompt), so a
+    // verdict names a rule by its place in that list, not by its id.
     // One candidate per part; a part that stayed silent on the rule is an
     // open question, which outranks a PASS from another part.
     const candidates = outputs.map(({ out, lines: shown, part }) => {
-      const v = out.verdicts.find((x) => x.rule === rule.id);
+      const v = out.verdicts.find((x) => x.rule === at + 1);
       return v
         ? verdictFrom(rule, v, shown, allPaths, file.path)
         : noVerdict(

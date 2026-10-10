@@ -11,6 +11,7 @@ import { machineReport, renderReport } from "./checker/report";
 import type { CheckResult, Progress, RuleSet } from "./checker/types";
 import type { AnswerOutcome, CheckLookup, CheckState } from "./server";
 import type { CheckRow } from "./store";
+import { CHECK_ID } from "./workspace";
 
 // What an MCP session carries: the workspace it was opened on.
 export type McpProps = { workspace: string };
@@ -146,7 +147,7 @@ export function registerTools(
         pr_url: z.string().describe("https://github.com/owner/repo/pull/123"),
         check_id: z
           .string()
-          .regex(/^[0-9a-z][0-9a-z-]{7,63}$/i)
+          .regex(CHECK_ID)
           .optional()
           .describe(
             "Your own id for this check, unique within the workspace, so get_check can find it if this call is cut off. One is generated otherwise."
