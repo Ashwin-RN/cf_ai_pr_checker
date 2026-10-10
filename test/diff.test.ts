@@ -26,7 +26,9 @@ const finding = (id: string, key: string): Finding => ({
   resolution: null,
   question: null,
   note: null,
-  attestation: null
+  attestation: null,
+  waiver: null,
+  evidence: null
 });
 
 const previous: PreviousRun = {
@@ -119,7 +121,8 @@ describe("assessedBy", () => {
     steps: [],
     resolution: null,
     question: null,
-    note: null
+    note: null,
+    evidencePath: null
   };
   const was = (
     path: string,

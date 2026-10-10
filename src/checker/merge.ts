@@ -12,7 +12,8 @@ import type {
   Rule,
   RuleStatus,
   Skipped,
-  Verdict
+  Verdict,
+  Waiver
 } from "./types";
 import { normalise } from "./verify";
 
@@ -201,6 +202,7 @@ export function ruleStatuses(
       blocking,
       complete,
       attested: false,
+      waived: false,
       detail
     });
     const hits = checked.flatMap((f) =>
@@ -307,10 +309,14 @@ export function ruleStatuses(
 }
 
 // Fail on a blocking rule; unsure when any rule is unsettled or has a file in
-// its scope the check did not cover; pass only when neither holds.
+// its scope the check did not cover; pass only when neither holds. A waived
+// rule is excused: it was already kept from blocking, and here it is kept
+// from leaving the check unsure.
 export function overallStatus(statuses: RuleStatus[]): CheckStatus {
   if (statuses.some((s) => s.blocking)) return "fail";
-  if (statuses.some((s) => s.status === "UNSURE" || !s.complete)) {
+  if (
+    statuses.some((s) => !s.waived && (s.status === "UNSURE" || !s.complete))
+  ) {
     return "unsure";
   }
   return "pass";
@@ -370,8 +376,11 @@ function fileDraft(
     steps: v.steps,
     resolution: v.resolution,
     question: null,
-    note: v.note,
-    attestation: null
+    note: v.mechanical ? null : v.note,
+    attestation: null,
+    waiver: null,
+    evidence: null,
+    ...(v.mechanical ? { by: "pattern" as const } : {})
   };
   if (blocks) return draft;
   if (v.verdict === "FAIL" && v.verified) {
@@ -441,7 +450,9 @@ export function buildFindings(
         resolution: null,
         question: null,
         note: null,
-        attestation: null
+        attestation: null,
+        waiver: null,
+        evidence: null
       });
     }
   }
@@ -467,7 +478,10 @@ export function buildFindings(
         [c.note, facts ? `across files, from: ${facts}` : null]
           .filter(Boolean)
           .join("; ") || null,
-      attestation: null
+      attestation: null,
+      waiver: null,
+      // The file the settle step asked for; the next check reads it.
+      evidence: blocks ? null : c.evidencePath
     };
     (blocks ? blocking : questions).push(draft);
   }
@@ -488,7 +502,9 @@ export function buildFindings(
       resolution: null,
       question: null,
       note: null,
-      attestation: null
+      attestation: null,
+      waiver: null,
+      evidence: null
     });
   }
   for (const claim of intent?.unsupported ?? []) {
@@ -508,7 +524,9 @@ export function buildFindings(
       resolution: null,
       question: null,
       note: null,
-      attestation: null
+      attestation: null,
+      waiver: null,
+      evidence: null
     });
   }
   blocking.sort(byRuleThenPath);
@@ -601,4 +619,87 @@ export function applyAttestations(
     return { ...s, status: "PASS", attested: true, detail };
   });
   return { statuses: out, findings: answered };
+}
+
+// The active waiver on each rule: one per rule at most, since waiving a rule
+// again replaces the earlier waiver.
+export function activeWaivers(waivers: Waiver[]): Map<number, Waiver> {
+  const byRule = new Map<number, Waiver>();
+  for (const w of waivers) {
+    if (w.revokedAt !== null) continue;
+    const current = byRule.get(w.rule);
+    if (!current || w.createdAt > current.createdAt) byRule.set(w.rule, w);
+  }
+  return byRule;
+}
+
+// A waiver excuses a rule for one pull request. The evidence stays in the
+// report as found; the rule stops blocking and stops leaving the check
+// unsure, and says why. Nothing is excused under strict. Rule ids are
+// positions in the rules file, so a waiver given against another rule set
+// names a different rule and does not count. A waiver given at an earlier
+// commit still counts, and is marked, since the reason may no longer hold.
+// A rule that passes needs no excuse and is left as it is.
+export function applyWaivers(
+  statuses: RuleStatus[],
+  findings: Finding[],
+  waivers: Waiver[],
+  rulesHash: string,
+  headSha: string,
+  strict: boolean
+): { statuses: RuleStatus[]; findings: Finding[] } {
+  const byRule = activeWaivers(waivers);
+  if (byRule.size === 0) {
+    return {
+      statuses,
+      findings: findings.map((f) => ({ ...f, waiver: null }))
+    };
+  }
+  const counts = (w: Waiver): string | null =>
+    strict
+      ? "not counted: the check is strict"
+      : w.rulesHash !== rulesHash
+        ? "not counted: the rules changed since the waiver"
+        : null;
+  const excused = (s: RuleStatus): Waiver | undefined => {
+    if ((s.status === "PASS" || s.status === "NA") && s.complete) {
+      return undefined;
+    }
+    return byRule.get(s.rule);
+  };
+  const excusedRules = new Set(
+    statuses.filter((s) => excused(s) !== undefined).map((s) => s.rule)
+  );
+  const marked = findings.map((f): Finding => {
+    const w =
+      f.kind !== "warning" && f.rule !== null && excusedRules.has(f.rule)
+        ? byRule.get(f.rule)
+        : undefined;
+    if (!w) return { ...f, waiver: null };
+    const note = counts(w);
+    return {
+      ...f,
+      waiver: {
+        reason: w.reason,
+        headSha: w.headSha,
+        at: w.createdAt,
+        counted: note === null,
+        note:
+          note ??
+          (w.headSha !== headSha ? "waived on an earlier revision" : null)
+      }
+    };
+  });
+  const out = statuses.map((s): RuleStatus => {
+    const w = excused(s);
+    if (!w || counts(w) !== null) return s;
+    const earlier = w.headSha !== headSha ? " on an earlier revision" : "";
+    return {
+      ...s,
+      blocking: false,
+      waived: true,
+      detail: `${s.detail}; waived${earlier}: "${preview(w.reason)}"`
+    };
+  });
+  return { statuses: out, findings: marked };
 }

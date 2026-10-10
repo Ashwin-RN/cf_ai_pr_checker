@@ -49,6 +49,8 @@ export type Skipped = { path: string; reason: string; coverage: boolean };
 // leaves as it was.
 export type Origin = "introduced" | "pre-existing";
 
+// `mechanical` is true when code decided the verdict by pattern, with no
+// model call; such a verdict is exact and gets no second look.
 export type FileVerdict = {
   rule: number;
   verdict: Verdict;
@@ -62,6 +64,7 @@ export type FileVerdict = {
   resolution: string | null;
   question: string | null;
   note: string | null;
+  mechanical: boolean;
 };
 
 export type FileWarning = {
@@ -94,6 +97,8 @@ export type FileCheck = {
 export type Fact = { index: number; path: string; text: string };
 
 // One rule settled from the facts of every file, for rules no single file can decide.
+// `evidencePath` is the one file, outside the pull request, whose contents
+// would settle an UNSURE verdict; the next check of the pull request reads it.
 export type CrossFileVerdict = {
   rule: number;
   verdict: Verdict;
@@ -104,6 +109,18 @@ export type CrossFileVerdict = {
   resolution: string | null;
   question: string | null;
   note: string | null;
+  evidencePath: string | null;
+};
+
+// A file an earlier check asked for, read at the head commit to settle a
+// rule across files. Its facts go to the settle step; it is not a changed
+// file, so it has no verdicts of its own.
+export type EvidenceFile = {
+  rule: number;
+  path: string;
+  state: "read" | "missing" | "unreadable" | "failed";
+  facts: string[];
+  reason: string | null;
 };
 
 export type Intent = {
@@ -140,6 +157,27 @@ export type Answered = {
   note: string | null;
 };
 
+// A rule excused for one pull request, with the reason. A revoked waiver is
+// kept, so a later reader can see what was waived, when, and why.
+export type Waiver = {
+  rule: number;
+  reason: string;
+  checkId: string | null;
+  headSha: string;
+  rulesHash: string;
+  createdAt: number;
+  revokedAt: number | null;
+};
+
+// How a waiver reached a finding in this run, and whether it counted.
+export type Waived = {
+  reason: string;
+  headSha: string;
+  at: number;
+  counted: boolean;
+  note: string | null;
+};
+
 export type Finding = {
   id: string;
   key: string;
@@ -157,17 +195,25 @@ export type Finding = {
   question: string | null;
   note: string | null;
   attestation: Answered | null;
+  waiver: Waived | null;
+  // The file this run asked for, to be read by the next check.
+  evidence: string | null;
+  // Present when code decided the item by pattern rather than the model.
+  by?: "pattern";
 };
 
 // `complete` is false when a file in the rule's scope was not covered for
 // it, whatever the status says. `attested` is true when the status is PASS
-// on the author's answers rather than on evidence the check saw.
+// on the author's answers rather than on evidence the check saw. `waived`
+// is true when the rule is excused for this pull request: its status stands
+// as found, but it neither blocks nor leaves the check unsure.
 export type RuleStatus = {
   rule: number;
   status: Verdict;
   blocking: boolean;
   complete: boolean;
   attested: boolean;
+  waived: boolean;
   detail: string;
 };
 export type CheckStatus = "pass" | "fail" | "unsure";
@@ -189,6 +235,8 @@ export type PreviousRun = {
     line: number | null;
     quote: string | null;
     summary: string;
+    // The file the finding asked for, which this run reads.
+    evidence?: string | null;
   }>;
 };
 
@@ -229,6 +277,10 @@ export type CheckResult = {
   previous: RunDiff | null;
   files: FileCheck[];
   notChecked: Skipped[];
+  // Files outside the pull request that the last check asked for.
+  evidence: EvidenceFile[];
+  // Every waiver recorded on this pull request, active and revoked.
+  waivers: Waiver[];
   coverageComplete: boolean;
   modelCalls: number;
   startedAt: number;
@@ -238,6 +290,8 @@ export type CheckResult = {
 export type ProgressFile = {
   path: string;
   state: "queued" | "checking" | "checked" | "failed";
+  // A file read as requested evidence rather than as a changed file.
+  role?: "evidence";
 };
 
 export type Progress = {

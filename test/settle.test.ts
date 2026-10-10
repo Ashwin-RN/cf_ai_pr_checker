@@ -111,7 +111,8 @@ const settled = (
 ) => ({
   verdicts: [
     {
-      rule: 2,
+      // The one cross-file rule is listed first, so the model calls it 1.
+      rule: 1,
       verdict,
       facts,
       reason: "r",
@@ -132,12 +133,15 @@ describe("settleCrossFile", () => {
     const out = await settleCrossFile(rules, pr, files, facts, call);
     expect(prompts).toHaveLength(1);
     const user = prompts[0][1].content;
-    expect(user).toContain("2. Every new route has a test");
+    // Rules are numbered as listed, so rule 2 reads as "1." here and in the
+    // open points; the verdict comes back under the rule's own id.
+    expect(user).toContain("1. Every new route has a test");
+    expect(user).not.toContain("2. Every");
     expect(user).not.toContain("No console.log");
     expect(user).toContain("[2] src/login.ts: adds route POST /login");
-    expect(user).toContain("- rule 2, src/login.ts: Is login tested?");
-    expect(user).toContain("- rule 2, test/login.test.ts: because");
-    expect(user).toContain("- rule 2, src/x.ts: possible fail: no test here");
+    expect(user).toContain("- rule 1, src/login.ts: Is login tested?");
+    expect(user).toContain("- rule 1, test/login.test.ts: because");
+    expect(user).toContain("- rule 1, src/x.ts: possible fail: no test here");
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({
       rule: 2,

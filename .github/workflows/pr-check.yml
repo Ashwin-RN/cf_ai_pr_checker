@@ -53,9 +53,9 @@ jobs:
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           status=$(jq -r .status result.json)
           # Verified means more than a passing status: every changed file
-          # was checked, no rule failed anywhere, pre-existing included, and
-          # no rule passes on the author's word alone.
-          verified=$(jq -r '(.status == "pass") and .coverage_complete and all(.rules[]; (.status == "PASS" or .status == "NA") and (.attested | not))' result.json)
+          # was checked, no rule failed anywhere, pre-existing included, no
+          # rule passes on the author's word alone, and no rule is waived.
+          verified=$(jq -r '(.status == "pass") and .coverage_complete and all(.rules[]; (.status == "PASS" or .status == "NA") and (.attested | not) and (.waived | not))' result.json)
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "verified=$verified" >> "$GITHUB_OUTPUT"
           case "$status" in

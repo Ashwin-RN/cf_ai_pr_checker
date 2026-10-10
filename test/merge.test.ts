@@ -32,6 +32,7 @@ const status = (
   blocking,
   complete,
   attested: false,
+  waived: false,
   detail: ""
 });
 
@@ -48,6 +49,7 @@ const settle = (
   resolution: null,
   question: null,
   note: null,
+  evidencePath: null,
   ...extra
 });
 
@@ -63,6 +65,7 @@ describe("ruleStatuses", () => {
       blocking: true,
       complete: true,
       attested: false,
+      waived: false,
       detail: "fails in b.ts:3"
     });
   });
@@ -83,6 +86,7 @@ describe("ruleStatuses", () => {
       blocking: false,
       complete: true,
       attested: false,
+      waived: false,
       detail: "fails in b.ts:3 on a line this pull request does not change"
     });
     expect(ruleStatuses(rules, files, [], [], true)[0].blocking).toBe(true);
@@ -289,6 +293,7 @@ describe("ruleStatuses", () => {
         blocking: true,
         complete: true,
         attested: false,
+        waived: false,
         detail: "fails across files: settled"
       });
       const failed = [file("src/a.ts", [verdict(2, "FAIL", { line: 1 })])];
@@ -642,7 +647,8 @@ describe("buildFindings", () => {
         steps: ["add a test"],
         resolution: "a test for f",
         question: null,
-        note: null
+        note: null,
+        evidencePath: null
       }
     ];
     const findings = buildFindings(crossRules, files, crossFile);

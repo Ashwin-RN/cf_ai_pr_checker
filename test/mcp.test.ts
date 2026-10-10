@@ -24,6 +24,9 @@ async function connect(ws: Partial<Workspace>, pollMs = 5): Promise<Client> {
       rules: notInThisTest,
       setRules: notInThisTest,
       checks: notInThisTest,
+      waive: notInThisTest,
+      revoke: notInThisTest,
+      stats: notInThisTest,
       ...ws
     },
     { pollMs }
@@ -56,7 +59,7 @@ const textOf = (r: Called): string => r.content[0]?.text ?? "";
 const finished = result({ id: "check-7", status: "unsure" });
 
 describe("the MCP server", () => {
-  it("offers the six tools of the loop", async () => {
+  it("offers the nine tools of the loop", async () => {
     const client = await connect({});
     const tools = (await client.listTools()).tools;
     expect(tools.map((t) => t.name).sort()).toEqual([
@@ -65,11 +68,109 @@ describe("the MCP server", () => {
       "get_check",
       "get_rules",
       "list_checks",
-      "set_rules"
+      "revoke_waiver",
+      "rule_stats",
+      "set_rules",
+      "waive_rule"
     ]);
     const check = tools.find((t) => t.name === "check_pr")!;
     expect(check.inputSchema.required).toEqual(["pr_url"]);
     expect(check.description).toContain("answer_question");
+    const waive = tools.find((t) => t.name === "waive_rule")!;
+    expect(waive.inputSchema.required).toEqual(["rule", "reason"]);
+  });
+
+  it("waive_rule and revoke_waiver record the change and preview the next status", async () => {
+    const waiver = {
+      rule: 1,
+      reason: "The log is behind a debug flag.",
+      checkId: "check-7",
+      headSha: "abcdef1234567890",
+      rulesHash: "hash",
+      createdAt: 5,
+      revokedAt: null as number | null
+    };
+    const preview = {
+      status: "pass" as const,
+      rules: [
+        {
+          rule: 1,
+          status: "FAIL" as const,
+          blocking: false,
+          complete: true,
+          attested: false,
+          waived: true,
+          detail:
+            'fails in src/a.ts:3; waived: "The log is behind a debug flag."'
+        }
+      ]
+    };
+    const seen: unknown[] = [];
+    const client = await connect({
+      waive: async (ref, rule, reason) => {
+        seen.push(["waive", ref, rule, reason]);
+        if (rule === 9) {
+          return {
+            ok: false,
+            message: "Check check-7 has no rule 9; its rules are 1 to 2."
+          };
+        }
+        return {
+          ok: true,
+          prUrl: "https://github.com/o/r/pull/1",
+          checkId: "check-7",
+          waiver,
+          preview
+        };
+      },
+      revoke: async (ref, rule) => {
+        seen.push(["revoke", ref, rule]);
+        return {
+          ok: true,
+          prUrl: "https://github.com/o/r/pull/1",
+          checkId: "check-7",
+          waiver: { ...waiver, revokedAt: 9 },
+          preview: { status: "fail", rules: [] }
+        };
+      }
+    });
+    const out = await call(client, "waive_rule", {
+      check_id: "check-7",
+      rule: 1,
+      reason: "The log is behind a debug flag."
+    });
+    expect(out.isError).toBeUndefined();
+    expect(textOf(out)).toBe(
+      'Waived rule 1 on https://github.com/o/r/pull/1: "The log is behind a debug flag.". The next check shows the rule\'s evidence as found and does not block on it; with the waivers so far, the same evidence gives PASS. A waiver counts for nothing under strict.'
+    );
+    expect(out.structuredContent).toMatchObject({
+      check_id: "check-7",
+      waiver: { rule: 1 },
+      preview: { status: "pass" }
+    });
+    expect(seen[0]).toEqual([
+      "waive",
+      { checkId: "check-7", prUrl: undefined },
+      1,
+      "The log is behind a debug flag."
+    ]);
+    const refused = await call(client, "waive_rule", {
+      pr_url: "https://github.com/o/r/pull/1",
+      rule: 9,
+      reason: "x"
+    });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toContain("has no rule 9");
+    const revoked = await call(client, "revoke_waiver", {
+      pr_url: "https://github.com/o/r/pull/1",
+      rule: 1
+    });
+    expect(textOf(revoked)).toBe(
+      "Revoked the waiver on rule 1 for https://github.com/o/r/pull/1. With the waivers left, the same evidence gives FAIL."
+    );
+    expect(revoked.structuredContent).toMatchObject({
+      waiver: { revokedAt: 9 }
+    });
   });
 
   it("check_pr returns the report as text and as structured content", async () => {
@@ -225,7 +326,9 @@ describe("the MCP server", () => {
         at: 1,
         counted: true,
         note: null
-      }
+      },
+      waiver: null,
+      evidence: null
     };
     const given: string[] = [];
     const client = await connect({
@@ -263,6 +366,7 @@ describe("the MCP server", () => {
                 blocking: false,
                 complete: true,
                 attested: true,
+                waived: false,
                 detail: 'passes by attestation: "Yes, in test/a.test.ts"'
               }
             ]
@@ -372,6 +476,44 @@ describe("the MCP server", () => {
           finished_at: Date.UTC(2026, 9, 9, 12, 1)
         }
       ]
+    });
+  });
+
+  it("rule_stats prints the table and hands over the numbers", async () => {
+    const client = await connect({
+      stats: async () => ({
+        checks: 6,
+        pullRequests: 2,
+        since: Date.UTC(2026, 9, 10),
+        rules: [
+          {
+            id: 1,
+            text: "No console.log",
+            checkedBy: "model",
+            checks: 6,
+            pass: 2,
+            fail: 0,
+            unsure: 4,
+            na: 0,
+            blocking: 0,
+            waived: 1,
+            attested: 0,
+            ambiguous: true
+          }
+        ]
+      })
+    });
+    const out = await call(client, "rule_stats");
+    expect(textOf(out)).toContain(
+      "6 checks of 2 pull requests since 2026-10-10."
+    );
+    expect(textOf(out)).toContain(
+      "| 1 | No console.log | 6 | 2 | 0 | 4 | 0 | 1 | ambiguous: rewrite or split |"
+    );
+    expect(out.structuredContent).toMatchObject({
+      checks: 6,
+      pull_requests: 2,
+      rules: [{ id: 1, checked_by: "model", ambiguous: true, waived: 1 }]
     });
   });
 

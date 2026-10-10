@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { limits } from "./limits";
+import { mechanicalKind } from "./mechanical";
 import type { JsonCaller } from "./model";
 import { rulesPrompt } from "./prompts";
 import type { Rule } from "./types";
@@ -113,8 +114,12 @@ export async function interpretRules(
     return {
       ...rule,
       polarity: n.polarity,
-      // A prohibition is always settled by the file that breaks it.
-      scope: n.polarity === "must_not" ? "file" : n.scope,
+      // A prohibition is always settled by the file that breaks it, and so
+      // is a rule that code checks by pattern.
+      scope:
+        n.polarity === "must_not" || mechanicalKind(rule.text) !== null
+          ? "file"
+          : n.scope,
       appliesTo: scopeFrom(n.applies_to, rule.text)
     };
   });

@@ -31,6 +31,7 @@ export function verdict(
     resolution: null,
     question: null,
     note: null,
+    mechanical: false,
     ...extra
   };
 }
@@ -85,6 +86,7 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
       blocking: false,
       complete: true,
       attested: false,
+      waived: false,
       detail: "passes in 1 file"
     })),
     findings: [],
@@ -98,6 +100,8 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
     previous: null,
     files: [],
     notChecked: [],
+    waivers: [],
+    evidence: [],
     coverageComplete: true,
     modelCalls: 0,
     startedAt: 0,

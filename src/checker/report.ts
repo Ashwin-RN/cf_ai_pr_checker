@@ -1,9 +1,16 @@
-import type { CheckResult, Finding, RuleStatus } from "./types";
+import { mechanicalKind } from "./mechanical";
+import { ACROSS_FILES } from "./merge";
+import type { CheckResult, EvidenceFile, Finding, RuleStatus } from "./types";
 
-const PROTOCOL = `How to use this report: work through Blocking, then Questions, then Warnings. Each item gives steps to run against your own code and the condition the next check verifies. After pushing, run the same check again: keys stay the same across runs, and each item says whether it is new or still open. A blocking item marked pre-existing sits on a line this pull request does not change; it is reported but does not fail the check unless strict. A question can be answered when the rule is met in a way the check cannot see; an item marked answered is settled by that answer and counts as a pass unless strict.`;
+const PROTOCOL = `How to use this report: work through Blocking, then Questions, then Warnings. Each item gives steps to run against your own code and the condition the next check verifies. After pushing, run the same check again: keys stay the same across runs, and each item says whether it is new or still open. A blocking item marked pre-existing sits on a line this pull request does not change; it is reported but does not fail the check unless strict. A question can be answered when the rule is met in a way the check cannot see; an item marked answered is settled by that answer and counts as a pass unless strict. An item marked waived is on a rule excused for this pull request with a recorded reason; its evidence stands, and the rule neither blocks nor leaves the check unsure, unless strict.`;
 
 function where(f: Finding): string {
   return f.line === null ? f.path : `${f.path}:${f.line}`;
+}
+
+// Whether a claim on the item, an answer or a waiver, settles it this run.
+function settled(f: Finding): boolean {
+  return Boolean(f.attestation?.counted || f.waiver?.counted);
 }
 
 function heading(f: Finding): string {
@@ -11,7 +18,9 @@ function heading(f: Finding): string {
   const tags = [
     f.origin === "pre-existing" ? "pre-existing" : null,
     f.change === "new" ? "new" : f.change === "open" ? "still open" : null,
-    f.attestation ? "answered" : null
+    f.attestation ? "answered" : null,
+    f.waiver ? "waived" : null,
+    f.by === "pattern" ? "checked by pattern" : null
   ]
     .filter(Boolean)
     .map((t) => ` · ${t}`)
@@ -19,10 +28,37 @@ function heading(f: Finding): string {
   return `### ${f.id}${rule} · ${where(f)} · key ${f.key}${tags}`;
 }
 
-function item(f: Finding): string {
+// What a requested file gave this run, in one line.
+function evidenceLine(e: EvidenceFile, headSha: string): string {
+  if (e.state === "read") {
+    const facts = e.facts.length
+      ? `: ${e.facts.join("; ")}`
+      : ", and it reported nothing that bears on the rule";
+    const cut = e.reason ? ` (${e.reason})` : "";
+    return `\`${e.path}\` was read this run${cut}${facts}`;
+  }
+  if (e.state === "missing") {
+    return `\`${e.path}\` does not exist at \`${headSha.slice(0, 7)}\``;
+  }
+  return `\`${e.path}\` could not be read this run (${e.reason ?? "unknown reason"})`;
+}
+
+function item(f: Finding, r: CheckResult): string {
   const out = [heading(f), ""];
   if (f.quote) out.push(`> \`${f.quote.trim()}\``, "");
   if (f.question) out.push(`**Question:** ${f.question}`, "");
+  // Files the last check asked for on this rule, and the one this check asks for.
+  if (f.path === ACROSS_FILES && f.rule !== null) {
+    for (const e of r.evidence.filter((e) => e.rule === f.rule)) {
+      out.push(`**Evidence read:** ${evidenceLine(e, r.pr.headSha)}.`, "");
+    }
+  }
+  if (f.evidence) {
+    out.push(
+      `**Evidence requested:** \`${f.evidence}\`. The next check of this pull request reads it and settles the rule from what it holds, or from its absence.`,
+      ""
+    );
+  }
   const a = f.attestation;
   if (a) {
     const stands = a.counted
@@ -30,6 +66,16 @@ function item(f: Finding): string {
       : (a.note ?? "not counted");
     out.push(
       `**Answer:** ${a.answer} (given at \`${a.headSha.slice(0, 7)}\`; ${stands})`,
+      ""
+    );
+  }
+  const w = f.waiver;
+  if (w) {
+    const stands = w.counted
+      ? ["the rule does not block", w.note].filter(Boolean).join("; ")
+      : (w.note ?? "not counted");
+    out.push(
+      `**Waived:** ${w.reason} (given at \`${w.headSha.slice(0, 7)}\`; ${stands})`,
       ""
     );
   }
@@ -41,8 +87,8 @@ function item(f: Finding): string {
     );
   }
   if (f.note) out.push(`**Caveat:** ${f.note}`, "");
-  // An answer that counts settles the item; its steps are for the unsettled.
-  if (a?.counted) return out.join("\n");
+  // A claim that counts settles the item; its steps are for the unsettled.
+  if (settled(f)) return out.join("\n");
   if (f.why) out.push(`**Why:** ${f.why}`, "");
   if (f.steps.length) {
     out.push("**Steps:**", "");
@@ -53,14 +99,16 @@ function item(f: Finding): string {
   return out.join("\n");
 }
 
-// Open items first; answered ones follow, so the reader meets what still
-// needs work before what is settled.
-function section(title: string, items: Finding[]): string {
+// Open items first; answered and waived ones follow, so the reader meets
+// what still needs work before what is settled.
+function section(title: string, items: Finding[], r: CheckResult): string {
   const ordered = [
-    ...items.filter((f) => !f.attestation?.counted),
-    ...items.filter((f) => f.attestation?.counted)
+    ...items.filter((f) => !settled(f)),
+    ...items.filter((f) => settled(f))
   ];
-  const body = ordered.length ? ordered.map(item).join("\n") : "none\n";
+  const body = ordered.length
+    ? ordered.map((f) => item(f, r)).join("\n")
+    : "none\n";
   return `## ${title}\n\n${body}`;
 }
 
@@ -88,9 +136,10 @@ function statusLine(r: CheckResult): string {
   const blocking = r.ruleStatuses.filter((s) => s.blocking).length;
   const preExisting = unchangedOnly(r);
   const unsure = r.ruleStatuses.filter(
-    (s) => s.status === "UNSURE" || !s.complete
+    (s) => !s.waived && (s.status === "UNSURE" || !s.complete)
   ).length;
   const attested = r.ruleStatuses.filter((s) => s.attested).length;
+  const waived = r.ruleStatuses.filter((s) => s.waived).length;
   const total = r.rules.length;
   const onAdded = r.strict ? "" : " on lines this pull request adds";
   const notes: string[] = [];
@@ -109,6 +158,11 @@ function statusLine(r: CheckResult): string {
       `${attested} pass${attested === 1 ? "es" : ""} by attestation (see Questions).`
     );
   }
+  if (waived) {
+    notes.push(
+      `${waived} ${waived === 1 ? "is" : "are"} waived for this pull request (see the rule table).`
+    );
+  }
   const rest = notes.length ? ` ${notes.join(" ")}` : "";
   if (r.status === "fail") {
     return `**FAIL.** ${blocking} of ${total} rules fail${onAdded}.${rest}`;
@@ -116,6 +170,7 @@ function statusLine(r: CheckResult): string {
   if (r.status === "unsure") {
     return `**UNSURE.** No rule fails${onAdded}, but ${unsure} of ${total} need${unsure === 1 ? "s" : ""} an answer or more coverage.${rest}`;
   }
+  if (waived) return `**PASS.** No rule blocks.${rest}`;
   return preExisting
     ? `**PASS.** No rule fails${onAdded}.${rest}`
     : `**PASS.** All ${total} rules pass on every checked file.${rest}`;
@@ -135,6 +190,7 @@ function previousLine(r: CheckResult): string | null {
 }
 
 function statusCell(s: RuleStatus): string {
+  if (s.waived) return `${s.status} (waived)`;
   if (s.attested) return "PASS (attested)";
   return s.status === "FAIL" && !s.blocking ? "FAIL (pre-existing)" : s.status;
 }
@@ -199,21 +255,40 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
         polarity: rule?.polarity ?? "must",
         scope: rule?.scope ?? "file",
         applies_to: rule?.appliesTo ?? null,
+        // "pattern" when code decides the rule with no model call.
+        checked_by:
+          rule && mechanicalKind(rule.text) !== null ? "pattern" : "model",
         status: s.status,
         blocking: s.blocking,
         complete: s.complete,
         attested: s.attested,
+        waived: s.waived,
         detail: s.detail
       };
     }),
     findings: r.findings,
+    // Every waiver on the pull request, active and revoked: the history of
+    // what was excused, when, and why.
+    waivers: r.waivers.map((w) => ({
+      rule: w.rule,
+      reason: w.reason,
+      check_id: w.checkId,
+      head_sha: w.headSha,
+      rules_hash: w.rulesHash,
+      created_at: w.createdAt,
+      revoked_at: w.revokedAt
+    })),
     cross_file: r.crossFile.map((c) => ({
       rule: c.rule,
       verdict: c.verdict,
       facts: c.facts.map((f) => f.text),
       reason: c.reason,
-      question: c.question
+      question: c.question,
+      evidence_path: c.evidencePath
     })),
+    // Files outside the pull request read this run because the last check
+    // asked for them, with what each gave.
+    evidence: r.evidence,
     intent: r.intent,
     previous: r.previous,
     not_checked: r.notChecked,
@@ -250,6 +325,27 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
           answer: "<how the rule is met>"
         }
       }
+    },
+    // How to excuse a rule for this pull request, with a reason that is kept.
+    waive: {
+      api: {
+        method: "POST",
+        path: "/api/waive",
+        body: {
+          checkId: r.id,
+          workspace: r.workspace,
+          rule: "<rule number>",
+          reason: "<why the rule does not apply here>"
+        }
+      },
+      mcp: {
+        tool: "waive_rule",
+        arguments: {
+          check_id: r.id,
+          rule: "<rule number>",
+          reason: "<why the rule does not apply here>"
+        }
+      }
     }
   };
 }
@@ -276,15 +372,18 @@ export function renderReport(r: CheckResult, opts: { json: boolean }): string {
     "",
     section(
       "Blocking",
-      r.findings.filter((f) => f.kind === "blocking")
+      r.findings.filter((f) => f.kind === "blocking"),
+      r
     ),
     section(
       "Questions",
-      r.findings.filter((f) => f.kind === "question")
+      r.findings.filter((f) => f.kind === "question"),
+      r
     ),
     section(
       "Warnings",
-      r.findings.filter((f) => f.kind === "warning")
+      r.findings.filter((f) => f.kind === "warning"),
+      r
     ),
     "## Not checked",
     "",

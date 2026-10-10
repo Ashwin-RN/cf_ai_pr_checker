@@ -19,7 +19,9 @@ const finding: Finding = {
   resolution: "No console.log in src/a.ts.",
   question: null,
   note: null,
-  attestation: null
+  attestation: null,
+  waiver: null,
+  evidence: null
 };
 
 describe("renderReport", () => {
@@ -54,6 +56,7 @@ describe("renderReport", () => {
             blocking: true,
             complete: true,
             attested: false,
+            waived: false,
             detail: "fails in src/a.ts:3"
           },
           {
@@ -62,6 +65,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail: "passes in 1 file"
           }
         ],
@@ -117,6 +121,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -126,6 +131,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail: "passes in 1 file"
           }
         ]
@@ -163,6 +169,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail:
               "possible fail in src/b.ts, quote not verified; also fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -172,6 +179,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail: ""
           }
         ]
@@ -197,6 +205,7 @@ describe("renderReport", () => {
             blocking: true,
             complete: true,
             attested: false,
+            waived: false,
             detail: ""
           }
         ]
@@ -221,6 +230,7 @@ describe("renderReport", () => {
             blocking: true,
             complete: true,
             attested: false,
+            waived: false,
             detail: ""
           },
           {
@@ -229,6 +239,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail: ""
           }
         ],
@@ -304,6 +315,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: false,
             attested: false,
+            waived: false,
             detail:
               "fails in src/a.ts:3 on a line this pull request does not change"
           },
@@ -313,6 +325,7 @@ describe("renderReport", () => {
             blocking: false,
             complete: true,
             attested: false,
+            waived: false,
             detail: ""
           }
         ],
@@ -343,6 +356,7 @@ describe("renderReport", () => {
           blocking: false,
           complete: true,
           attested: false,
+          waived: false,
           detail: ""
         }
       ]

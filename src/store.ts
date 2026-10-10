@@ -4,7 +4,8 @@ import type {
   FileCheck,
   PreviousRun,
   Rule,
-  RuleSet
+  RuleSet,
+  Waiver
 } from "./checker/types";
 
 type Value = string | number | boolean | null;
@@ -29,15 +30,30 @@ export function readResult(json: string): CheckResult {
   r.ruleStatuses = r.ruleStatuses.map((s) => ({
     ...s,
     complete: s.complete ?? r.coverageComplete ?? true,
-    attested: s.attested ?? false
+    attested: s.attested ?? false,
+    waived: s.waived ?? false
   }));
   r.findings = r.findings.map((f) => ({
     ...f,
-    attestation: f.attestation ?? null
+    attestation: f.attestation ?? null,
+    waiver: f.waiver ?? null,
+    evidence: f.evidence ?? null
   }));
-  r.files = (r.files ?? []).map((f) => ({ ...f, seen: f.seen ?? {} }));
-  r.crossFile ??= [];
+  r.files = (r.files ?? []).map((f) => ({
+    ...f,
+    seen: f.seen ?? {},
+    verdicts: (f.verdicts ?? []).map((v) => ({
+      ...v,
+      mechanical: v.mechanical ?? false
+    }))
+  }));
+  r.crossFile = (r.crossFile ?? []).map((c) => ({
+    ...c,
+    evidencePath: c.evidencePath ?? null
+  }));
   r.notChecked ??= [];
+  r.evidence ??= [];
+  r.waivers ??= [];
   if (r.previous) {
     r.previous.resolved ??= [];
     r.previous.unassessed ??= [];
@@ -62,7 +78,8 @@ export function previousRunOf(r: CheckResult): PreviousRun {
       path: f.path,
       line: f.line ?? null,
       quote: f.quote ?? null,
-      summary: f.summary
+      summary: f.summary,
+      evidence: f.evidence ?? null
     });
   }
   return {
@@ -99,6 +116,12 @@ export class Store {
       pr_url TEXT NOT NULL, key TEXT NOT NULL, rule INTEGER, path TEXT NOT NULL,
       question TEXT NOT NULL, answer TEXT NOT NULL, check_id TEXT NOT NULL, head_sha TEXT NOT NULL,
       rules_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (pr_url, key))`;
+    // A waiver is never deleted. Revoking sets revoked_at; waiving the rule
+    // again adds a row, so the history of a rule on a pull request is whole.
+    this.sql`CREATE TABLE IF NOT EXISTS waivers (
+      pr_url TEXT NOT NULL, rule INTEGER NOT NULL, reason TEXT NOT NULL, check_id TEXT,
+      head_sha TEXT NOT NULL, rules_hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+      revoked_at INTEGER, PRIMARY KEY (pr_url, rule, created_at))`;
   }
 
   // A normalised rule set, keyed by the hash of its text. Saving the same
@@ -255,6 +278,71 @@ export class Store {
         createdAt: r.created_at
       })
     );
+  }
+
+  // Waives a rule on a pull request. An active waiver on the same rule is
+  // revoked first, so one rule has at most one active waiver.
+  putWaiver(prUrl: string, w: Waiver): void {
+    this.revokeWaiver(prUrl, w.rule, w.createdAt);
+    this
+      .sql`INSERT OR REPLACE INTO waivers (pr_url, rule, reason, check_id, head_sha, rules_hash, created_at, revoked_at)
+      VALUES (${prUrl}, ${w.rule}, ${w.reason}, ${w.checkId}, ${w.headSha}, ${w.rulesHash}, ${w.createdAt}, ${w.revokedAt})`;
+  }
+
+  // Ends the active waiver on a rule, if there is one. True when there was.
+  revokeWaiver(prUrl: string, rule: number, at: number): boolean {
+    const active = this.sql<{ created_at: number }>`
+      SELECT created_at FROM waivers WHERE pr_url = ${prUrl} AND rule = ${rule} AND revoked_at IS NULL`;
+    if (!active.length) return false;
+    this.sql`UPDATE waivers SET revoked_at = ${at}
+      WHERE pr_url = ${prUrl} AND rule = ${rule} AND revoked_at IS NULL`;
+    return true;
+  }
+
+  // Every waiver on a pull request, oldest first, revoked ones included.
+  waiversFor(prUrl: string): Waiver[] {
+    return this.sql<{
+      rule: number;
+      reason: string;
+      check_id: string | null;
+      head_sha: string;
+      rules_hash: string;
+      created_at: number;
+      revoked_at: number | null;
+    }>`SELECT rule, reason, check_id, head_sha, rules_hash, created_at, revoked_at
+      FROM waivers WHERE pr_url = ${prUrl} ORDER BY created_at`.map((r) => ({
+      rule: r.rule,
+      reason: r.reason,
+      checkId: r.check_id,
+      headSha: r.head_sha,
+      rulesHash: r.rules_hash,
+      createdAt: r.created_at,
+      revokedAt: r.revoked_at
+    }));
+  }
+
+  // Every finished check, newest first, for the rule statistics.
+  finishedResults(limit: number): CheckResult[] {
+    return this.sql<{ result_json: string }>`
+      SELECT result_json FROM checks WHERE result_json IS NOT NULL
+      ORDER BY started_at DESC LIMIT ${limit}`.map((r) =>
+      readResult(r.result_json)
+    );
+  }
+
+  // The pull request a check was started on, finished or not.
+  prUrlOf(checkId: string): string | null {
+    const row = this.sql<{ pr_url: string }>`
+      SELECT pr_url FROM checks WHERE id = ${checkId}`[0];
+    return row?.pr_url ?? null;
+  }
+
+  // The last finished check of a pull request, whole.
+  latestResultFor(prUrl: string): CheckResult | null {
+    const row = this.sql<{ result_json: string | null }>`
+      SELECT result_json FROM checks WHERE pr_url = ${prUrl} AND result_json IS NOT NULL
+      ORDER BY started_at DESC LIMIT 1`[0];
+    return row?.result_json ? readResult(row.result_json) : null;
   }
 
   listChecks(limit = 20): CheckRow[] {

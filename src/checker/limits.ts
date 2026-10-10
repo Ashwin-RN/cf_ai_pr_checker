@@ -15,6 +15,15 @@ export const limits = {
   stepsPerFinding: 4,
   factsPerFile: 5,
   factsPerSettle: 150,
+  // Files outside the pull request that a check reads because the last
+  // check asked for them, one model call each, and the facts kept per file.
+  evidenceFilesPerCheck: 3,
+  evidenceFacts: 8,
+  evidencePathChars: 200,
+  // Rule statistics read this many finished checks, newest first, and flag
+  // a rule ambiguous only once it has been checked this often.
+  statsChecksMax: 500,
+  statsMinChecks: 5,
   warningsPerFile: 3,
   warningsPerReport: 5,
   // A quote matches a whole line, or a substring once it is long enough not

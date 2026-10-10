@@ -7,10 +7,19 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { limits } from "./checker/limits";
+import { mechanicalKind } from "./checker/mechanical";
 import { machineReport, renderReport } from "./checker/report";
 import type { CheckResult, Progress, RuleSet } from "./checker/types";
-import type { AnswerOutcome, CheckLookup, CheckState } from "./server";
+import type {
+  AnswerOutcome,
+  CheckLookup,
+  CheckState,
+  PrRef,
+  WaiveOutcome
+} from "./server";
+import { type Stats, statsMarkdown } from "./stats";
 import type { CheckRow } from "./store";
+import { CHECK_ID } from "./workspace";
 
 // What an MCP session carries: the workspace it was opened on.
 export type McpProps = { workspace: string };
@@ -33,6 +42,9 @@ export type Workspace = {
   rules(): Promise<RuleSet | null>;
   setRules(texts: string[]): Promise<{ set: RuleSet; interpreted: boolean }>;
   checks(limit: number): Promise<CheckRow[]>;
+  waive(ref: PrRef, rule: number, reason: string): Promise<WaiveOutcome>;
+  revoke(ref: PrRef, rule: number): Promise<WaiveOutcome>;
+  stats(): Promise<Stats>;
 };
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -71,7 +83,7 @@ function rulesResult(
     : `${n} rule${n === 1 ? "" : "s"} from ${set.source} (set ${set.hash}).`;
   const lines = set.rules.map(
     (r) =>
-      `${r.id}. ${r.text} (${r.polarity === "must_not" ? "must not" : "must"}; ${r.scope === "cross_file" ? "may span files" : "one file"}; ${r.appliesTo?.join(", ") ?? "everywhere"})`
+      `${r.id}. ${r.text} (${r.polarity === "must_not" ? "must not" : "must"}; ${r.scope === "cross_file" ? "may span files" : "one file"}; ${r.appliesTo?.join(", ") ?? "everywhere"}${mechanicalKind(r.text) ? "; checked by pattern" : ""})`
   );
   return text([head, ...lines].join("\n"), {
     hash: set.hash,
@@ -82,7 +94,8 @@ function rulesResult(
       text: r.text,
       polarity: r.polarity,
       scope: r.scope,
-      applies_to: r.appliesTo
+      applies_to: r.appliesTo,
+      checked_by: mechanicalKind(r.text) ? "pattern" : "model"
     }))
   });
 }
@@ -146,7 +159,7 @@ export function registerTools(
         pr_url: z.string().describe("https://github.com/owner/repo/pull/123"),
         check_id: z
           .string()
-          .regex(/^[0-9a-z][0-9a-z-]{7,63}$/i)
+          .regex(CHECK_ID)
           .optional()
           .describe(
             "Your own id for this check, unique within the workspace, so get_check can find it if this call is cut off. One is generated otherwise."
@@ -243,6 +256,74 @@ export function registerTools(
     }
   );
 
+  const prRef = {
+    check_id: z
+      .string()
+      .optional()
+      .describe("A check of the pull request, by id or a prefix of it."),
+    pr_url: z
+      .string()
+      .optional()
+      .describe("The pull request link, when no check id is given.")
+  };
+
+  server.registerTool(
+    "waive_rule",
+    {
+      title: "Waive a rule on a pull request",
+      description:
+        "Excuses one rule for one pull request, with a reason that is kept on record. The rule must be one of the last finished check of that pull request. On the next check the rule's evidence is shown as found, marked waived, and the rule neither blocks nor leaves the check unsure; under strict a waiver counts for nothing. Use it when a rule does not apply to this change and say why; do not use it to silence a real failure. revoke_waiver ends it.",
+      inputSchema: {
+        ...prRef,
+        rule: z.number().int().min(1).describe("The rule's number."),
+        reason: z.string().describe("Why the rule does not apply here.")
+      }
+    },
+    async ({ check_id, pr_url, rule, reason }) => {
+      const out = await ws.waive(
+        { checkId: check_id, prUrl: pr_url },
+        rule,
+        reason
+      );
+      if (!out.ok) return text(out.message, undefined, true);
+      return text(
+        `Waived rule ${rule} on ${out.prUrl}: "${out.waiver.reason}". The next check shows the rule's evidence as found and does not block on it; with the waivers so far, the same evidence gives ${out.preview.status.toUpperCase()}. A waiver counts for nothing under strict.`,
+        {
+          pr_url: out.prUrl,
+          check_id: out.checkId,
+          waiver: out.waiver,
+          preview: out.preview
+        }
+      );
+    }
+  );
+
+  server.registerTool(
+    "revoke_waiver",
+    {
+      title: "Revoke a waiver",
+      description:
+        "Ends the waiver on a rule for a pull request. The waiver stays on record as revoked; the next check holds the rule to its evidence again.",
+      inputSchema: {
+        ...prRef,
+        rule: z.number().int().min(1).describe("The rule's number.")
+      }
+    },
+    async ({ check_id, pr_url, rule }) => {
+      const out = await ws.revoke({ checkId: check_id, prUrl: pr_url }, rule);
+      if (!out.ok) return text(out.message, undefined, true);
+      return text(
+        `Revoked the waiver on rule ${rule} for ${out.prUrl}. With the waivers left, the same evidence gives ${out.preview.status.toUpperCase()}.`,
+        {
+          pr_url: out.prUrl,
+          check_id: out.checkId,
+          waiver: out.waiver,
+          preview: out.preview
+        }
+      );
+    }
+  );
+
   server.registerTool(
     "get_rules",
     {
@@ -267,6 +348,38 @@ export function registerTools(
     async ({ rules }) => {
       const { set, interpreted } = await ws.setRules(rules);
       return rulesResult(set, true, interpreted);
+    }
+  );
+
+  server.registerTool(
+    "rule_stats",
+    {
+      title: "Rule statistics",
+      description:
+        "Per rule, across every finished check in this workspace: how often it passed, failed, stayed UNSURE or did not apply, how often it blocked, was waived or passed by attestation, and whether code or the model checks it. A rule that is UNSURE more than half the time over five or more checks is flagged ambiguous: rewrite or split it.",
+      annotations: { readOnlyHint: true }
+    },
+    async () => {
+      const stats = await ws.stats();
+      return text(statsMarkdown(stats), {
+        checks: stats.checks,
+        pull_requests: stats.pullRequests,
+        since: stats.since,
+        rules: stats.rules.map((r) => ({
+          id: r.id,
+          text: r.text,
+          checked_by: r.checkedBy,
+          checks: r.checks,
+          pass: r.pass,
+          fail: r.fail,
+          unsure: r.unsure,
+          na: r.na,
+          blocking: r.blocking,
+          waived: r.waived,
+          attested: r.attested,
+          ambiguous: r.ambiguous
+        }))
+      });
     }
   );
 
