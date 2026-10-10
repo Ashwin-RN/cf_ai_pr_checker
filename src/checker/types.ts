@@ -49,6 +49,8 @@ export type Skipped = { path: string; reason: string; coverage: boolean };
 // leaves as it was.
 export type Origin = "introduced" | "pre-existing";
 
+// `mechanical` is true when code decided the verdict by pattern, with no
+// model call; such a verdict is exact and gets no second look.
 export type FileVerdict = {
   rule: number;
   verdict: Verdict;
@@ -62,6 +64,7 @@ export type FileVerdict = {
   resolution: string | null;
   question: string | null;
   note: string | null;
+  mechanical: boolean;
 };
 
 export type FileWarning = {
@@ -195,6 +198,8 @@ export type Finding = {
   waiver: Waived | null;
   // The file this run asked for, to be read by the next check.
   evidence: string | null;
+  // Present when code decided the item by pattern rather than the model.
+  by?: "pattern";
 };
 
 // `complete` is false when a file in the rule's scope was not covered for

@@ -39,7 +39,14 @@ export function readResult(json: string): CheckResult {
     waiver: f.waiver ?? null,
     evidence: f.evidence ?? null
   }));
-  r.files = (r.files ?? []).map((f) => ({ ...f, seen: f.seen ?? {} }));
+  r.files = (r.files ?? []).map((f) => ({
+    ...f,
+    seen: f.seen ?? {},
+    verdicts: (f.verdicts ?? []).map((v) => ({
+      ...v,
+      mechanical: v.mechanical ?? false
+    }))
+  }));
   r.crossFile = (r.crossFile ?? []).map((c) => ({
     ...c,
     evidencePath: c.evidencePath ?? null

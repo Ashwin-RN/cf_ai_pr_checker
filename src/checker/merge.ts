@@ -376,10 +376,11 @@ function fileDraft(
     steps: v.steps,
     resolution: v.resolution,
     question: null,
-    note: v.note,
+    note: v.mechanical ? null : v.note,
     attestation: null,
     waiver: null,
-    evidence: null
+    evidence: null,
+    ...(v.mechanical ? { by: "pattern" as const } : {})
   };
   if (blocks) return draft;
   if (v.verdict === "FAIL" && v.verified) {

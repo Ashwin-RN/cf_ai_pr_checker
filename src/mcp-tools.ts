@@ -7,6 +7,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { limits } from "./checker/limits";
+import { mechanicalKind } from "./checker/mechanical";
 import { machineReport, renderReport } from "./checker/report";
 import type { CheckResult, Progress, RuleSet } from "./checker/types";
 import type {
@@ -80,7 +81,7 @@ function rulesResult(
     : `${n} rule${n === 1 ? "" : "s"} from ${set.source} (set ${set.hash}).`;
   const lines = set.rules.map(
     (r) =>
-      `${r.id}. ${r.text} (${r.polarity === "must_not" ? "must not" : "must"}; ${r.scope === "cross_file" ? "may span files" : "one file"}; ${r.appliesTo?.join(", ") ?? "everywhere"})`
+      `${r.id}. ${r.text} (${r.polarity === "must_not" ? "must not" : "must"}; ${r.scope === "cross_file" ? "may span files" : "one file"}; ${r.appliesTo?.join(", ") ?? "everywhere"}${mechanicalKind(r.text) ? "; checked by pattern" : ""})`
   );
   return text([head, ...lines].join("\n"), {
     hash: set.hash,
@@ -91,7 +92,8 @@ function rulesResult(
       text: r.text,
       polarity: r.polarity,
       scope: r.scope,
-      applies_to: r.appliesTo
+      applies_to: r.appliesTo,
+      checked_by: mechanicalKind(r.text) ? "pattern" : "model"
     }))
   });
 }

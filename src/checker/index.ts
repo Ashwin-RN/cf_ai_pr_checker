@@ -16,6 +16,7 @@ import {
   overallStatus,
   ruleStatuses
 } from "./merge";
+import { mechanicalFor } from "./mechanical";
 import type { JsonCaller } from "./model";
 import {
   confirmPrompt,
@@ -105,6 +106,8 @@ async function secondLook(
 ): Promise<void> {
   for (const v of verdicts) {
     if (v.verdict !== "FAIL" || !v.verified || v.line === null) continue;
+    // A verdict by pattern is exact; a second opinion would be the model's.
+    if (v.mechanical) continue;
     const rule = rules.find((r) => r.id === v.rule);
     if (!rule || !assertsPresence("FAIL", rule.polarity)) continue;
     const second = await callJson(
@@ -173,14 +176,24 @@ function verdictFrom(
       : [],
     resolution: settled && v.resolution.trim() ? v.resolution.trim() : null,
     question:
-      v.verdict === "UNSURE" && v.question.trim() ? v.question.trim() : null
+      v.verdict === "UNSURE" && v.question.trim() ? v.question.trim() : null,
+    mechanical: false
   };
 }
 
-// The model answered without a verdict for this rule. Silence is not a pass,
-// and a file checked in parts needs a verdict from every part.
-function noVerdict(rule: Rule, path: string, part: string | null): FileVerdict {
+// The model answered without a verdict for this rule, or could not answer at
+// all. Silence is not a pass, and a file checked in parts needs a verdict
+// from every part.
+function noVerdict(
+  rule: Rule,
+  path: string,
+  part: string | null,
+  error: string | null = null
+): FileVerdict {
   const where = part ? ` in ${part}` : "";
+  const reason = error
+    ? `the model could not check this rule (${error})`
+    : `the model returned no verdict for this rule${where}`;
   return {
     rule: rule.id,
     verdict: "UNSURE",
@@ -188,12 +201,15 @@ function noVerdict(rule: Rule, path: string, part: string | null): FileVerdict {
     line: null,
     verified: true,
     origin: null,
-    reason: `the model returned no verdict for this rule${where}`,
+    reason,
     why: "",
     steps: [],
     resolution: null,
-    question: `Does ${path} meet rule ${rule.id}? The check returned no verdict for it${where}.`,
-    note: null
+    question: error
+      ? `Does ${path} meet rule ${rule.id}? The model could not check it.`
+      : `Does ${path} meet rule ${rule.id}? The check returned no verdict for it${where}.`,
+    note: null,
+    mechanical: false
   };
 }
 
@@ -206,7 +222,9 @@ function present(quote: string, lines: HunkLine[]): boolean {
 }
 
 // Runs the model on one file, in parts when it is big, and turns the answers
-// into verified verdicts. Without content the diff alone is checked.
+// into verified verdicts. Without content the diff alone is checked. A rule
+// code can check by pattern is decided by code over the whole file first,
+// and the model is asked only about the rest.
 export async function checkFile(
   rules: Rule[],
   file: PrFile,
@@ -231,7 +249,8 @@ export async function checkFile(
       steps: [],
       resolution: null,
       question: null,
-      note: null
+      note: null,
+      mechanical: false
     }));
   const base = {
     path: file.path,
@@ -255,6 +274,24 @@ export async function checkFile(
     content === null
       ? parseHunks(file.patch ?? "")
       : fileLines(content, file.patch ?? "");
+  const byPattern = active.flatMap((rule) => {
+    const checker = mechanicalFor(rule);
+    return checker ? [checker.check(rule, file.path, lines)] : [];
+  });
+  const forModel = active.filter((rule) => mechanicalFor(rule) === null);
+  if (forModel.length === 0) {
+    // Code saw the whole file, so every earlier finding here was assessed.
+    const seen: Record<string, boolean> = {};
+    for (const e of earlier) if (e.quote) seen[e.key] = true;
+    return {
+      ...base,
+      state: "checked",
+      coverage: content === null ? "partial" : "full",
+      reason: contentNote ?? "every rule that applies is checked by pattern",
+      verdicts: [...outOfScope, ...byPattern].sort((a, b) => a.rule - b.rule),
+      seen
+    };
+  }
   const { chunks, cut, windowed } = chunkLines(lines);
   const outputs: Array<{ out: FileOutput; lines: HunkLine[]; part: number }> =
     [];
@@ -264,7 +301,7 @@ export async function checkFile(
     const rendered = renderHunks(chunk);
     const result = await callJson(
       filePrompt(
-        active,
+        forModel,
         file,
         rendered.text,
         content === null
@@ -284,22 +321,42 @@ export async function checkFile(
   }
   const raw = raws.length ? raws.join("\n---\n") : null;
   if (outputs.length === 0) {
+    if (byPattern.length === 0) {
+      return {
+        ...base,
+        state: "failed",
+        coverage: "partial",
+        reason: lastError ?? "no output",
+        chunks: chunks.length,
+        verdicts: [],
+        raw
+      };
+    }
+    // The model is out, the pattern checks hold: the file is checked for
+    // those rules and open on the rest.
     return {
       ...base,
-      state: "failed",
+      state: "checked",
       coverage: "partial",
-      reason: lastError ?? "no output",
+      reason: `the model could not check it: ${lastError ?? "no output"}`,
       chunks: chunks.length,
-      verdicts: [],
+      verdicts: [
+        ...outOfScope,
+        ...byPattern,
+        ...forModel.map((rule) =>
+          noVerdict(rule, file.path, null, lastError ?? "no output")
+        )
+      ].sort((a, b) => a.rule - b.rule),
       raw
     };
   }
-  const verdicts: FileVerdict[] = [...outOfScope];
-  for (const [at, rule] of active.entries()) {
+  const verdicts: FileVerdict[] = [...outOfScope, ...byPattern];
+  for (const [at, rule] of forModel.entries()) {
     // The prompt numbers the rules it lists 1 to N (see filePrompt), so a
-    // verdict names a rule by its place in that list, not by its id.
-    // One candidate per part; a part that stayed silent on the rule is an
-    // open question, which outranks a PASS from another part.
+    // verdict names a rule by its place in that list, not by its id; the
+    // list is the rules the model was given, with the pattern-checked ones
+    // left out. One candidate per part; a part that stayed silent on the
+    // rule is an open question, which outranks a PASS from another part.
     const candidates = outputs.map(({ out, lines: shown, part }) => {
       const v = out.verdicts.find((x) => x.rule === at + 1);
       return v
@@ -312,7 +369,7 @@ export async function checkFile(
     });
     verdicts.push(candidates.sort((a, b) => rank(b) - rank(a))[0]);
   }
-  await secondLook(active, file, lines, verdicts, callJson);
+  await secondLook(forModel, file, lines, verdicts, callJson);
   const shown = new Set(lines.map((l) => l.line));
   const failed = chunks.length - outputs.length;
   // Which earlier findings this check reached: the quoted line was in a part

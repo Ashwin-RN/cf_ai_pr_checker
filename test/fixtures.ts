@@ -31,6 +31,7 @@ export function verdict(
     resolution: null,
     question: null,
     note: null,
+    mechanical: false,
     ...extra
   };
 }

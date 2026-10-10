@@ -13,6 +13,7 @@ import {
   parsePrUrl
 } from "./checker/github";
 import { limits } from "./checker/limits";
+import { mechanicalKind } from "./checker/mechanical";
 import {
   applyAttestations,
   applyWaivers,
@@ -126,7 +127,8 @@ function rulesMarkdown(
     const scope = r.scope === "cross_file" ? "may span files" : "one file";
     const applies =
       r.appliesTo?.map((g) => `\`${g}\``).join(", ") ?? "everywhere";
-    return `| ${r.id} | ${r.text.replace(/\|/g, "\\|")} | ${reads} | ${scope} | ${applies} |`;
+    const by = mechanicalKind(r.text) ? "pattern" : "model";
+    return `| ${r.id} | ${r.text.replace(/\|/g, "\\|")} | ${reads} | ${scope} | ${applies} | ${by} |`;
   });
   const caveat = interpreted
     ? ""
@@ -134,8 +136,8 @@ function rulesMarkdown(
   return [
     `Saved ${rules.length} rule${rules.length === 1 ? "" : "s"} as set \`${hash}\`. Paste a pull request link to run them. A \`${RULES_FILE}\` file in the checked repository takes precedence.${caveat}`,
     "",
-    "| # | Rule | Reads as | Scope | Applies to |",
-    "| --- | --- | --- | --- | --- |",
+    "| # | Rule | Reads as | Scope | Applies to | Checked by |",
+    "| --- | --- | --- | --- | --- | --- |",
     ...rows
   ].join("\n");
 }

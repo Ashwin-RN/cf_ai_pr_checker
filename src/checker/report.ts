@@ -1,3 +1,4 @@
+import { mechanicalKind } from "./mechanical";
 import { ACROSS_FILES } from "./merge";
 import type { CheckResult, EvidenceFile, Finding, RuleStatus } from "./types";
 
@@ -18,7 +19,8 @@ function heading(f: Finding): string {
     f.origin === "pre-existing" ? "pre-existing" : null,
     f.change === "new" ? "new" : f.change === "open" ? "still open" : null,
     f.attestation ? "answered" : null,
-    f.waiver ? "waived" : null
+    f.waiver ? "waived" : null,
+    f.by === "pattern" ? "checked by pattern" : null
   ]
     .filter(Boolean)
     .map((t) => ` · ${t}`)
@@ -253,6 +255,9 @@ export function machineReport(r: CheckResult): Record<string, unknown> {
         polarity: rule?.polarity ?? "must",
         scope: rule?.scope ?? "file",
         applies_to: rule?.appliesTo ?? null,
+        // "pattern" when code decides the rule with no model call.
+        checked_by:
+          rule && mechanicalKind(rule.text) !== null ? "pattern" : "model",
         status: s.status,
         blocking: s.blocking,
         complete: s.complete,
