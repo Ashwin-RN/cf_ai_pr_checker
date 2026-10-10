@@ -31,7 +31,7 @@ repeat until the status is pass. Keys stay the same across runs, so an item
 that is still open is the same item, and an answered one stays answered.
 ```
 
-A report from a run against a fixture pull request that adds one file with a `console.log` call:
+A report from a run against a fixture pull request that adds a function with a `console.log` call, and its test:
 
 ```markdown
 # PR check · Ashwin-RN/pr-check-fixtures#2 · FAIL
