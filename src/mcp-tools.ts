@@ -17,6 +17,7 @@ import type {
   PrRef,
   WaiveOutcome
 } from "./server";
+import { type Stats, statsMarkdown } from "./stats";
 import type { CheckRow } from "./store";
 import { CHECK_ID } from "./workspace";
 
@@ -43,6 +44,7 @@ export type Workspace = {
   checks(limit: number): Promise<CheckRow[]>;
   waive(ref: PrRef, rule: number, reason: string): Promise<WaiveOutcome>;
   revoke(ref: PrRef, rule: number): Promise<WaiveOutcome>;
+  stats(): Promise<Stats>;
 };
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -346,6 +348,38 @@ export function registerTools(
     async ({ rules }) => {
       const { set, interpreted } = await ws.setRules(rules);
       return rulesResult(set, true, interpreted);
+    }
+  );
+
+  server.registerTool(
+    "rule_stats",
+    {
+      title: "Rule statistics",
+      description:
+        "Per rule, across every finished check in this workspace: how often it passed, failed, stayed UNSURE or did not apply, how often it blocked, was waived or passed by attestation, and whether code or the model checks it. A rule that is UNSURE more than half the time over five or more checks is flagged ambiguous: rewrite or split it.",
+      annotations: { readOnlyHint: true }
+    },
+    async () => {
+      const stats = await ws.stats();
+      return text(statsMarkdown(stats), {
+        checks: stats.checks,
+        pull_requests: stats.pullRequests,
+        since: stats.since,
+        rules: stats.rules.map((r) => ({
+          id: r.id,
+          text: r.text,
+          checked_by: r.checkedBy,
+          checks: r.checks,
+          pass: r.pass,
+          fail: r.fail,
+          unsure: r.unsure,
+          na: r.na,
+          blocking: r.blocking,
+          waived: r.waived,
+          attested: r.attested,
+          ambiguous: r.ambiguous
+        }))
+      });
     }
   );
 

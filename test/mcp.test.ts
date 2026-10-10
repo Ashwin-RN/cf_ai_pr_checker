@@ -26,6 +26,7 @@ async function connect(ws: Partial<Workspace>, pollMs = 5): Promise<Client> {
       checks: notInThisTest,
       waive: notInThisTest,
       revoke: notInThisTest,
+      stats: notInThisTest,
       ...ws
     },
     { pollMs }
@@ -58,7 +59,7 @@ const textOf = (r: Called): string => r.content[0]?.text ?? "";
 const finished = result({ id: "check-7", status: "unsure" });
 
 describe("the MCP server", () => {
-  it("offers the eight tools of the loop", async () => {
+  it("offers the nine tools of the loop", async () => {
     const client = await connect({});
     const tools = (await client.listTools()).tools;
     expect(tools.map((t) => t.name).sort()).toEqual([
@@ -68,6 +69,7 @@ describe("the MCP server", () => {
       "get_rules",
       "list_checks",
       "revoke_waiver",
+      "rule_stats",
       "set_rules",
       "waive_rule"
     ]);
@@ -474,6 +476,44 @@ describe("the MCP server", () => {
           finished_at: Date.UTC(2026, 9, 9, 12, 1)
         }
       ]
+    });
+  });
+
+  it("rule_stats prints the table and hands over the numbers", async () => {
+    const client = await connect({
+      stats: async () => ({
+        checks: 6,
+        pullRequests: 2,
+        since: Date.UTC(2026, 9, 10),
+        rules: [
+          {
+            id: 1,
+            text: "No console.log",
+            checkedBy: "model",
+            checks: 6,
+            pass: 2,
+            fail: 0,
+            unsure: 4,
+            na: 0,
+            blocking: 0,
+            waived: 1,
+            attested: 0,
+            ambiguous: true
+          }
+        ]
+      })
+    });
+    const out = await call(client, "rule_stats");
+    expect(textOf(out)).toContain(
+      "6 checks of 2 pull requests since 2026-10-10."
+    );
+    expect(textOf(out)).toContain(
+      "| 1 | No console.log | 6 | 2 | 0 | 4 | 0 | 1 | ambiguous: rewrite or split |"
+    );
+    expect(out.structuredContent).toMatchObject({
+      checks: 6,
+      pull_requests: 2,
+      rules: [{ id: 1, checked_by: "model", ambiguous: true, waived: 1 }]
     });
   });
 

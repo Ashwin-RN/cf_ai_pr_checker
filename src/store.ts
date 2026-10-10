@@ -321,6 +321,15 @@ export class Store {
     }));
   }
 
+  // Every finished check, newest first, for the rule statistics.
+  finishedResults(limit: number): CheckResult[] {
+    return this.sql<{ result_json: string }>`
+      SELECT result_json FROM checks WHERE result_json IS NOT NULL
+      ORDER BY started_at DESC LIMIT ${limit}`.map((r) =>
+      readResult(r.result_json)
+    );
+  }
+
   // The pull request a check was started on, finished or not.
   prUrlOf(checkId: string): string | null {
     const row = this.sql<{ pr_url: string }>`

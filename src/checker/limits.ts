@@ -20,6 +20,10 @@ export const limits = {
   evidenceFilesPerCheck: 3,
   evidenceFacts: 8,
   evidencePathChars: 200,
+  // Rule statistics read this many finished checks, newest first, and flag
+  // a rule ambiguous only once it has been checked this often.
+  statsChecksMax: 500,
+  statsMinChecks: 5,
   warningsPerFile: 3,
   warningsPerReport: 5,
   // A quote matches a whole line, or a substring once it is long enough not

@@ -43,6 +43,7 @@ import type {
 } from "./checker/types";
 import { parseCommand } from "./commands";
 import { CheckMcp, type McpProps } from "./mcp";
+import { type Stats, ruleStats, statsMarkdown } from "./stats";
 import { Store, type Sql } from "./store";
 import type { CheckParams, RulesLookup } from "./workflow";
 import { streamChatResponse, toChatMessages } from "./workers-ai";
@@ -77,7 +78,7 @@ const CHAT_HISTORY = 12;
 const CHAT_MESSAGE_CHARS = 4_000;
 
 const SYSTEM_PROMPT = `You are the chat side of a pull request checker that runs on Cloudflare.
-How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks. "answer Q2: <how the rule is met>" answers a question from the last report; the next check of that pull request then passes the rule by attestation unless strict. "waive rule 3: <reason>" excuses a rule for that pull request with the reason kept; the rule's evidence is still shown but it no longer blocks, unless strict. "revoke rule 3" ends the waiver.
+How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks. "answer Q2: <how the rule is met>" answers a question from the last report; the next check of that pull request then passes the rule by attestation unless strict. "waive rule 3: <reason>" excuses a rule for that pull request with the reason kept; the rule's evidence is still shown but it no longer blocks, unless strict. "revoke rule 3" ends the waiver. "stats" shows, per rule, how often it passed, failed or stayed open across the checks here, and flags a rule that is open too often as ambiguous.
 Answer questions about that briefly. You cannot run a check yourself and must never claim to have checked anything.`;
 
 function json(data: unknown, status = 200): Response {
@@ -236,6 +237,8 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
         return this.rulesResponse(command.text);
       case "history":
         return reply(this.historyMarkdown());
+      case "stats":
+        return reply(statsMarkdown(this.stats()));
       case "answer":
         return reply(
           this.answerMarkdown(command.question, command.checkId, command.text)
@@ -397,6 +400,9 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
           })
         : json({ error: out.message }, 400);
     }
+    if (request.method === "GET" && url.pathname === "/api/stats") {
+      return json(this.stats());
+    }
     const match = /^\/api\/checks\/([\w-]+)$/.exec(url.pathname);
     if (request.method === "GET" && match) {
       const state = this.stateOf(match[1]);
@@ -430,6 +436,21 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
   @callable()
   getCheck(id: string) {
     return this.store.getCheck(id);
+  }
+
+  @callable()
+  getStats() {
+    return this.stats();
+  }
+
+  // Per rule, across the finished checks of this workspace: how often it
+  // passed, failed, stayed open, blocked or was waived, with a rule that is
+  // open more than half the time over enough checks flagged ambiguous.
+  stats(): Stats {
+    return ruleStats(
+      this.store.finishedResults(limits.statsChecksMax),
+      this.store.currentRules()
+    );
   }
 
   // The methods below are called over RPC by the MCP server as well as from

@@ -36,7 +36,8 @@ export class CheckMcp extends McpAgent<AppEnv, unknown, McpProps> {
       checks: async (limit) => (await agent()).listChecks(limit),
       waive: async (ref, rule, reason) =>
         (await agent()).waive(ref, rule, reason),
-      revoke: async (ref, rule) => (await agent()).revoke(ref, rule)
+      revoke: async (ref, rule) => (await agent()).revoke(ref, rule),
+      stats: async () => (await agent()).stats()
     };
   }
 }
