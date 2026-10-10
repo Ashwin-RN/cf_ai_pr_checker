@@ -13,7 +13,11 @@ import {
   parsePrUrl
 } from "./checker/github";
 import { limits } from "./checker/limits";
-import { applyAttestations, overallStatus } from "./checker/merge";
+import {
+  applyAttestations,
+  applyWaivers,
+  overallStatus
+} from "./checker/merge";
 import { jsonCaller, modelFor, workersAiText } from "./checker/model";
 import { machineReport, renderReport } from "./checker/report";
 import {
@@ -33,7 +37,8 @@ import type {
   Progress,
   Rule,
   RuleSet,
-  RuleStatus
+  RuleStatus,
+  Waiver
 } from "./checker/types";
 import { parseCommand } from "./commands";
 import { CheckMcp, type McpProps } from "./mcp";
@@ -71,7 +76,7 @@ const CHAT_HISTORY = 12;
 const CHAT_MESSAGE_CHARS = 4_000;
 
 const SYSTEM_PROMPT = `You are the chat side of a pull request checker that runs on Cloudflare.
-How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks. "answer Q2: <how the rule is met>" answers a question from the last report; the next check of that pull request then passes the rule by attestation unless strict.
+How it works: the user sends a message starting with "rules:" with one rule per line, then pastes a public GitHub pull request link. If the checked repository has a pr-rules.md file at the root of its base branch, those rules are used instead. The checker fetches every changed file in full, checks each against the rules with one model call per file, verifies every quoted line in code, settles rules that span files from per-file facts, compares the description with the changes, and replies with a report: Blocking, Questions and Warnings, each with steps to resolve it. A second check of the same pull request says which findings are new, still open or resolved. "history" lists past checks. "answer Q2: <how the rule is met>" answers a question from the last report; the next check of that pull request then passes the rule by attestation unless strict. "waive rule 3: <reason>" excuses a rule for that pull request with the reason kept; the rule's evidence is still shown but it no longer blocks, unless strict. "revoke rule 3" ends the waiver.
 Answer questions about that briefly. You cannot run a check yourself and must never claim to have checked anything.`;
 
 function json(data: unknown, status = 200): Response {
@@ -179,6 +184,21 @@ export type AnswerOutcome =
     }
   | { ok: false; message: string };
 
+// A waiver or a revocation, with what the last check of the pull request
+// gives once every waiver so far is applied.
+export type WaiveOutcome =
+  | {
+      ok: true;
+      prUrl: string;
+      checkId: string;
+      waiver: Waiver;
+      preview: { status: CheckStatus; rules: RuleStatus[] };
+    }
+  | { ok: false; message: string };
+
+// A pull request named by its link, or by the id of one of its checks.
+export type PrRef = { prUrl?: string; checkId?: string };
+
 // A check this instance is waiting on: where its progress goes and how its
 // end is delivered.
 type Waiter = {
@@ -218,6 +238,12 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
         return reply(
           this.answerMarkdown(command.question, command.checkId, command.text)
         );
+      case "waive":
+        return reply(
+          this.waiveMarkdown(command.rule, command.ref, command.reason)
+        );
+      case "revoke":
+        return reply(this.waiveMarkdown(command.rule, command.ref, null));
       case "check":
         return this.checkResponse(command.prUrl);
       case "chat":
@@ -324,6 +350,47 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
             pr_url: out.prUrl,
             finding: out.finding,
             attestation: out.attestation,
+            preview: out.preview
+          })
+        : json({ error: out.message }, 400);
+    }
+    if (
+      request.method === "POST" &&
+      (url.pathname === "/api/waive" || url.pathname === "/api/revoke")
+    ) {
+      const revoking = url.pathname === "/api/revoke";
+      const body = (await request.json().catch(() => null)) as {
+        prUrl?: unknown;
+        checkId?: unknown;
+        rule?: unknown;
+        reason?: unknown;
+      } | null;
+      const ref: PrRef = {};
+      if (typeof body?.prUrl === "string") ref.prUrl = body.prUrl;
+      if (typeof body?.checkId === "string") ref.checkId = body.checkId;
+      if (
+        !body ||
+        (!ref.prUrl && !ref.checkId) ||
+        typeof body.rule !== "number" ||
+        (!revoking && typeof body.reason !== "string")
+      ) {
+        return json(
+          {
+            error: revoking
+              ? "Body must be JSON with a rule number and a prUrl or checkId string."
+              : "Body must be JSON with a rule number, a reason string, and a prUrl or checkId string."
+          },
+          400
+        );
+      }
+      const out = revoking
+        ? this.revoke(ref, body.rule)
+        : this.waive(ref, body.rule, body.reason as string);
+      return out.ok
+        ? json({
+            pr_url: out.prUrl,
+            check_id: out.checkId,
+            waiver: out.waiver,
             preview: out.preview
           })
         : json({ error: out.message }, 400);
@@ -491,11 +558,134 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
       prUrl: result.pr.url,
       finding: applied.findings.find((f) => f.key === finding.key) ?? finding,
       attestation,
-      preview: {
-        status: overallStatus(applied.statuses),
-        rules: applied.statuses
-      }
+      preview: this.previewWith(result, result.pr.url)
     };
+  }
+
+  // Excuses a rule for one pull request, with a reason that is kept. The
+  // rule must be one of the last finished check of that pull request, so
+  // the waiver names a rule that exists and is tied to the rule set it was
+  // given against. The next check shows the rule's evidence as found,
+  // marked waived, and does not block on it, unless strict.
+  waive(ref: PrRef, rule: number, reason: string): WaiveOutcome {
+    const found = this.findPr(ref);
+    if (!found.ok) return found;
+    const { prUrl, result } = found;
+    if (!result.rules.some((r) => r.id === rule)) {
+      return {
+        ok: false,
+        message: `Check ${result.id} has no rule ${rule}; its rules are 1 to ${result.rules.length}.`
+      };
+    }
+    const text = reason
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, limits.answerChars);
+    if (!text) return { ok: false, message: "The reason is empty." };
+    const waiver: Waiver = {
+      rule,
+      reason: text,
+      checkId: result.id,
+      headSha: result.pr.headSha,
+      rulesHash: result.rulesHash,
+      createdAt: Date.now(),
+      revokedAt: null
+    };
+    this.store.putWaiver(prUrl, waiver);
+    return {
+      ok: true,
+      prUrl,
+      checkId: result.id,
+      waiver,
+      preview: this.previewWith(result, prUrl)
+    };
+  }
+
+  // Ends the active waiver on a rule. The waiver stays on record as revoked.
+  revoke(ref: PrRef, rule: number): WaiveOutcome {
+    const found = this.findPr(ref);
+    if (!found.ok) return found;
+    const { prUrl, result } = found;
+    const at = Date.now();
+    const before = this.store
+      .waiversFor(prUrl)
+      .find((w) => w.rule === rule && w.revokedAt === null);
+    if (!before || !this.store.revokeWaiver(prUrl, rule, at)) {
+      return {
+        ok: false,
+        message: `Rule ${rule} is not waived on ${prUrl}.`
+      };
+    }
+    return {
+      ok: true,
+      prUrl,
+      checkId: result.id,
+      waiver: { ...before, revokedAt: at },
+      preview: this.previewWith(result, prUrl)
+    };
+  }
+
+  // The pull request a reference names, and its last finished check.
+  private findPr(
+    ref: PrRef
+  ):
+    | { ok: true; prUrl: string; result: CheckResult }
+    | { ok: false; message: string } {
+    let prUrl: string | null = null;
+    if (ref.prUrl) {
+      const parsed = parsePrUrl(ref.prUrl);
+      if (!parsed) {
+        return {
+          ok: false,
+          message:
+            "That is not a GitHub pull request link. Expected https://github.com/owner/repo/pull/123."
+        };
+      }
+      prUrl = canonicalPrUrl(parsed);
+    } else if (ref.checkId) {
+      const id = this.store.findCheckId(ref.checkId);
+      prUrl = id ? this.store.prUrlOf(id) : null;
+      if (!prUrl) {
+        return { ok: false, message: `No check matches ${ref.checkId}.` };
+      }
+    } else {
+      return {
+        ok: false,
+        message: "Name the pull request by its link or by a check id."
+      };
+    }
+    const result = this.store.latestResultFor(prUrl);
+    if (!result) {
+      return {
+        ok: false,
+        message: `No finished check of ${prUrl} in this workspace. Run a check first; a waiver names a rule of that check.`
+      };
+    }
+    return { ok: true, prUrl, result };
+  }
+
+  // What the stored run gives with every answer and waiver so far applied:
+  // the same evidence, no model call.
+  private previewWith(
+    result: CheckResult,
+    prUrl: string
+  ): { status: CheckStatus; rules: RuleStatus[] } {
+    const answered = applyAttestations(
+      result.ruleStatuses,
+      result.findings,
+      this.store.attestationsFor(prUrl),
+      result.rulesHash,
+      result.strict
+    );
+    const applied = applyWaivers(
+      answered.statuses,
+      answered.findings,
+      this.store.waiversFor(prUrl),
+      result.rulesHash,
+      result.pr.headSha,
+      result.strict
+    );
+    return { status: overallStatus(applied.statuses), rules: applied.statuses };
   }
 
   // Called by the Workflow over RPC: the rules for a pull request, with a
@@ -714,6 +904,32 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     return `Recorded your answer to ${out.finding.id} (rule ${out.attestation.rule}, ${out.attestation.path}) on check \`${out.checkId.slice(0, 8)}\`. The next check of ${out.prUrl} takes it: with the answers so far, the same evidence gives ${out.preview.status.toUpperCase()}. An answer counts as a pass by attestation, never under strict.`;
   }
 
+  // "waive rule 3: ..." and "revoke rule 3" act on the latest finished
+  // check; "on <check id or pull request link>" names one.
+  private waiveMarkdown(
+    rule: number,
+    ref: string | null,
+    reason: string | null
+  ): string {
+    let target: PrRef;
+    if (ref === null) {
+      const id = this.store.latestCheckId();
+      if (!id) return "No finished check to waive a rule on yet.";
+      target = { checkId: id };
+    } else {
+      target = parsePrUrl(ref) ? { prUrl: ref } : { checkId: ref };
+    }
+    const out =
+      reason === null
+        ? this.revoke(target, rule)
+        : this.waive(target, rule, reason);
+    if (!out.ok) return out.message;
+    const status = out.preview.status.toUpperCase();
+    return reason === null
+      ? `Revoked the waiver on rule ${rule} for ${out.prUrl}. With the waivers left, the same evidence gives ${status}.`
+      : `Waived rule ${rule} on ${out.prUrl}: "${out.waiver.reason}". The next check shows the rule's evidence as found and does not block on it; with the waivers so far, the same evidence gives ${status}. A waiver counts for nothing under strict; \`revoke rule ${rule}\` ends it.`;
+  }
+
   private historyMarkdown(): string {
     const rows = this.store.listChecks();
     if (!rows.length) return "No checks yet.";
@@ -788,7 +1004,8 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
       rules: options.rules ?? null,
       strict: options.strict ?? false,
       previous: this.store.previousCheck(canonical),
-      attestations: this.store.attestationsFor(canonical)
+      attestations: this.store.attestationsFor(canonical),
+      waivers: this.store.waiversFor(canonical)
     };
     this.store.startCheck(id, canonical);
     const onProgress = (progress: Progress) => {

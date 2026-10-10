@@ -4,6 +4,7 @@ import { checkIntent } from "./intent";
 import { limits } from "./limits";
 import {
   applyAttestations,
+  applyWaivers,
   buildFindings,
   gateCrossFile,
   overallStatus,
@@ -35,7 +36,8 @@ import type {
   Rule,
   RuleSet,
   Runner,
-  Skipped
+  Skipped,
+  Waiver
 } from "./types";
 import {
   annotateSteps,
@@ -60,6 +62,8 @@ export type CheckInput = {
   previous?: PreviousRun | null;
   // Questions answered on earlier checks of the same pull request.
   attestations?: Attestation[] | null;
+  // Rules waived on this pull request, revoked ones included.
+  waivers?: Waiver[] | null;
 };
 
 export type CheckDeps = {
@@ -528,11 +532,22 @@ export function assemble(a: Assembly): CheckResult {
   );
   // Answers settle questions after the merge and before the diff, so an
   // answered finding keeps its key and the diff sees it as the same item.
-  const { statuses, findings } = applyAttestations(
+  // Waivers come after answers: a rule still open or failing once the
+  // answers are counted may be excused for this pull request.
+  const answered = applyAttestations(
     ruleStatuses(ruleSet.rules, results, notChecked, gated, strict),
     buildFindings(ruleSet.rules, results, gated, intent),
     input.attestations ?? [],
     ruleSet.hash,
+    strict
+  );
+  const waivers = input.waivers ?? [];
+  const { statuses, findings } = applyWaivers(
+    answered.statuses,
+    answered.findings,
+    waivers,
+    ruleSet.hash,
+    pr.headSha,
     strict
   );
   const diffed = diffRun(
@@ -566,8 +581,10 @@ export function assemble(a: Assembly): CheckResult {
     previous: diffed.previous,
     files: results,
     notChecked,
+    waivers,
     // Complete when no rule has a file in its scope the check did not cover
-    // for it; a skipped file no rule needed is not a gap.
+    // for it; a skipped file no rule needed is not a gap. A waiver does not
+    // fill a gap: the rule is excused, the file is still unseen.
     coverageComplete: statuses.every((s) => s.complete),
     // The rules were interpreted before the stages ran, so their calls
     // arrive on the set.

@@ -140,6 +140,27 @@ export type Answered = {
   note: string | null;
 };
 
+// A rule excused for one pull request, with the reason. A revoked waiver is
+// kept, so a later reader can see what was waived, when, and why.
+export type Waiver = {
+  rule: number;
+  reason: string;
+  checkId: string | null;
+  headSha: string;
+  rulesHash: string;
+  createdAt: number;
+  revokedAt: number | null;
+};
+
+// How a waiver reached a finding in this run, and whether it counted.
+export type Waived = {
+  reason: string;
+  headSha: string;
+  at: number;
+  counted: boolean;
+  note: string | null;
+};
+
 export type Finding = {
   id: string;
   key: string;
@@ -157,17 +178,21 @@ export type Finding = {
   question: string | null;
   note: string | null;
   attestation: Answered | null;
+  waiver: Waived | null;
 };
 
 // `complete` is false when a file in the rule's scope was not covered for
 // it, whatever the status says. `attested` is true when the status is PASS
-// on the author's answers rather than on evidence the check saw.
+// on the author's answers rather than on evidence the check saw. `waived`
+// is true when the rule is excused for this pull request: its status stands
+// as found, but it neither blocks nor leaves the check unsure.
 export type RuleStatus = {
   rule: number;
   status: Verdict;
   blocking: boolean;
   complete: boolean;
   attested: boolean;
+  waived: boolean;
   detail: string;
 };
 export type CheckStatus = "pass" | "fail" | "unsure";
@@ -229,6 +254,8 @@ export type CheckResult = {
   previous: RunDiff | null;
   files: FileCheck[];
   notChecked: Skipped[];
+  // Every waiver recorded on this pull request, active and revoked.
+  waivers: Waiver[];
   coverageComplete: boolean;
   modelCalls: number;
   startedAt: number;

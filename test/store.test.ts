@@ -95,7 +95,8 @@ describe("previousRunOf", () => {
           resolution: null,
           question: "Still?",
           note: null,
-          attestation: null
+          attestation: null,
+          waiver: null
         }
       ],
       previous: {

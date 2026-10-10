@@ -38,6 +38,7 @@ const question = (
   question: "Is parseDate covered by a test outside this PR?",
   note: null,
   attestation: null,
+  waiver: null,
   ...extra
 });
 
@@ -47,6 +48,7 @@ const unsure = (ruleId: number, complete = true): RuleStatus => ({
   blocking: false,
   complete,
   attested: false,
+  waived: false,
   detail: "needs an answer for src/a.ts"
 });
 
@@ -79,6 +81,7 @@ describe("applyAttestations", () => {
     expect(out.statuses[0]).toMatchObject({
       status: "PASS",
       attested: true,
+      waived: false,
       blocking: false,
       complete: true,
       detail: 'passes by attestation: "Yes, test/dates.test.ts calls it."'
@@ -264,6 +267,7 @@ describe("applyAttestations", () => {
       status: "FAIL",
       blocking: false,
       attested: false,
+      waived: false,
       complete: true,
       detail:
         "fails in src/b.ts:3 on a line this pull request does not change; its question is answered by attestation"
@@ -400,6 +404,7 @@ describe("the report with an answered question", () => {
         blocking: false,
         complete: true,
         attested: false,
+        waived: false,
         detail: "passes in 1 file"
       },
       {
@@ -408,6 +413,7 @@ describe("the report with an answered question", () => {
         blocking: false,
         complete: true,
         attested: true,
+        waived: false,
         detail: 'passes by attestation: "Yes, test/dates.test.ts calls it."'
       }
     ]

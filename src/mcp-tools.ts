@@ -9,7 +9,13 @@ import { z } from "zod";
 import { limits } from "./checker/limits";
 import { machineReport, renderReport } from "./checker/report";
 import type { CheckResult, Progress, RuleSet } from "./checker/types";
-import type { AnswerOutcome, CheckLookup, CheckState } from "./server";
+import type {
+  AnswerOutcome,
+  CheckLookup,
+  CheckState,
+  PrRef,
+  WaiveOutcome
+} from "./server";
 import type { CheckRow } from "./store";
 import { CHECK_ID } from "./workspace";
 
@@ -34,6 +40,8 @@ export type Workspace = {
   rules(): Promise<RuleSet | null>;
   setRules(texts: string[]): Promise<{ set: RuleSet; interpreted: boolean }>;
   checks(limit: number): Promise<CheckRow[]>;
+  waive(ref: PrRef, rule: number, reason: string): Promise<WaiveOutcome>;
+  revoke(ref: PrRef, rule: number): Promise<WaiveOutcome>;
 };
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -238,6 +246,74 @@ export function registerTools(
           pr_url: out.prUrl,
           finding: out.finding,
           attestation: out.attestation,
+          preview: out.preview
+        }
+      );
+    }
+  );
+
+  const prRef = {
+    check_id: z
+      .string()
+      .optional()
+      .describe("A check of the pull request, by id or a prefix of it."),
+    pr_url: z
+      .string()
+      .optional()
+      .describe("The pull request link, when no check id is given.")
+  };
+
+  server.registerTool(
+    "waive_rule",
+    {
+      title: "Waive a rule on a pull request",
+      description:
+        "Excuses one rule for one pull request, with a reason that is kept on record. The rule must be one of the last finished check of that pull request. On the next check the rule's evidence is shown as found, marked waived, and the rule neither blocks nor leaves the check unsure; under strict a waiver counts for nothing. Use it when a rule does not apply to this change and say why; do not use it to silence a real failure. revoke_waiver ends it.",
+      inputSchema: {
+        ...prRef,
+        rule: z.number().int().min(1).describe("The rule's number."),
+        reason: z.string().describe("Why the rule does not apply here.")
+      }
+    },
+    async ({ check_id, pr_url, rule, reason }) => {
+      const out = await ws.waive(
+        { checkId: check_id, prUrl: pr_url },
+        rule,
+        reason
+      );
+      if (!out.ok) return text(out.message, undefined, true);
+      return text(
+        `Waived rule ${rule} on ${out.prUrl}: "${out.waiver.reason}". The next check shows the rule's evidence as found and does not block on it; with the waivers so far, the same evidence gives ${out.preview.status.toUpperCase()}. A waiver counts for nothing under strict.`,
+        {
+          pr_url: out.prUrl,
+          check_id: out.checkId,
+          waiver: out.waiver,
+          preview: out.preview
+        }
+      );
+    }
+  );
+
+  server.registerTool(
+    "revoke_waiver",
+    {
+      title: "Revoke a waiver",
+      description:
+        "Ends the waiver on a rule for a pull request. The waiver stays on record as revoked; the next check holds the rule to its evidence again.",
+      inputSchema: {
+        ...prRef,
+        rule: z.number().int().min(1).describe("The rule's number.")
+      }
+    },
+    async ({ check_id, pr_url, rule }) => {
+      const out = await ws.revoke({ checkId: check_id, prUrl: pr_url }, rule);
+      if (!out.ok) return text(out.message, undefined, true);
+      return text(
+        `Revoked the waiver on rule ${rule} for ${out.prUrl}. With the waivers left, the same evidence gives ${out.preview.status.toUpperCase()}.`,
+        {
+          pr_url: out.prUrl,
+          check_id: out.checkId,
+          waiver: out.waiver,
           preview: out.preview
         }
       );
