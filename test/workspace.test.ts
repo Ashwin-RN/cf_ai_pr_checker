@@ -4,6 +4,7 @@ import {
   checkIdOf,
   isApiWorkspace,
   isChatWorkspace,
+  isCheckId,
   newChatWorkspace,
   workflowInstance,
   workspaceOf
@@ -32,6 +33,16 @@ describe("workspaces", () => {
     expect(workspaceOf(apiInstance("ci"))).toBe("ci");
     const chat = newChatWorkspace();
     expect(workspaceOf(chat)).toBe(chat);
+  });
+
+  it("admits a caller's check id only in the shape the store can find again", () => {
+    expect(isCheckId("review-1234")).toBe(true);
+    expect(isCheckId("eval-clean-mgk3x9z1")).toBe(true);
+    expect(isCheckId(crypto.randomUUID())).toBe(true);
+    expect(isCheckId("short")).toBe(false);
+    expect(isCheckId("-leading-dash")).toBe(false);
+    expect(isCheckId("has space here")).toBe(false);
+    expect(isCheckId("a".repeat(65))).toBe(false);
   });
 
   it("keeps a client's check id from colliding across workspaces in the Workflow", () => {

@@ -45,6 +45,7 @@ import {
   checkIdOf,
   isApiWorkspace,
   isChatWorkspace,
+  isCheckId,
   workflowInstance,
   workspaceOf
 } from "./workspace";
@@ -255,10 +256,24 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
         prUrl?: unknown;
         rules?: unknown;
         strict?: unknown;
+        checkId?: unknown;
       } | null;
       if (!body || typeof body.prUrl !== "string") {
         return json({ error: "Body must be JSON with a prUrl string." }, 400);
       }
+      // A caller may name its check, so a cut connection loses nothing: the
+      // check keeps running and GET /api/checks/<id> finds it.
+      if (body.checkId !== undefined && !isCheckId(String(body.checkId))) {
+        return json(
+          {
+            error:
+              "checkId must be 8 to 64 letters, digits and dashes, starting with a letter or digit."
+          },
+          400
+        );
+      }
+      const id =
+        body.checkId === undefined ? crypto.randomUUID() : String(body.checkId);
       let rules: string[] | undefined;
       if (body.rules !== undefined) {
         rules = Array.isArray(body.rules)
@@ -273,7 +288,7 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
           );
         }
       }
-      const out = await this.apiCheck(crypto.randomUUID(), body.prUrl, {
+      const out = await this.apiCheck(id, body.prUrl, {
         rules,
         strict: body.strict === true
       });
@@ -315,10 +330,20 @@ export class ChatAgent extends AIChatAgent<AppEnv> {
     }
     const match = /^\/api\/checks\/([\w-]+)$/.exec(url.pathname);
     if (request.method === "GET" && match) {
-      const result = this.store.getCheck(match[1]);
-      return result
-        ? json(apiBody(result))
-        : json({ error: "No such check." }, 404);
+      const state = this.stateOf(match[1]);
+      if (!state) return json({ error: "No such check." }, 404);
+      if (state.status === "done") return json(apiBody(state.result));
+      if (state.status === "error") {
+        return json({ error: state.error, kind: "error" }, 502);
+      }
+      return json(
+        {
+          check_id: this.store.findCheckId(match[1]),
+          status: "running",
+          progress: state.progress
+        },
+        202
+      );
     }
     return json({ error: "Not found." }, 404);
   }

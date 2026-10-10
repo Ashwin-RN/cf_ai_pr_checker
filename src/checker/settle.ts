@@ -71,8 +71,9 @@ export async function settleCrossFile(
   );
   if (!result.ok) return [];
   const allPaths = new Set(pr.files.map((f) => f.path));
-  return crossFile.flatMap((rule) => {
-    const v = result.value.verdicts.find((x) => x.rule === rule.id);
+  return crossFile.flatMap((rule, at) => {
+    // The prompt numbers the rules as listed, 1 to N, not by id.
+    const v = result.value.verdicts.find((x) => x.rule === at + 1);
     if (!v) return [];
     const cited = [...new Set(v.facts)]
       .map((i) => facts[i])
