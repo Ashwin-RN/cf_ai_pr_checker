@@ -36,11 +36,16 @@ export function readResult(json: string): CheckResult {
   r.findings = r.findings.map((f) => ({
     ...f,
     attestation: f.attestation ?? null,
-    waiver: f.waiver ?? null
+    waiver: f.waiver ?? null,
+    evidence: f.evidence ?? null
   }));
   r.files = (r.files ?? []).map((f) => ({ ...f, seen: f.seen ?? {} }));
-  r.crossFile ??= [];
+  r.crossFile = (r.crossFile ?? []).map((c) => ({
+    ...c,
+    evidencePath: c.evidencePath ?? null
+  }));
   r.notChecked ??= [];
+  r.evidence ??= [];
   r.waivers ??= [];
   if (r.previous) {
     r.previous.resolved ??= [];
@@ -66,7 +71,8 @@ export function previousRunOf(r: CheckResult): PreviousRun {
       path: f.path,
       line: f.line ?? null,
       quote: f.quote ?? null,
-      summary: f.summary
+      summary: f.summary,
+      evidence: f.evidence ?? null
     });
   }
   return {

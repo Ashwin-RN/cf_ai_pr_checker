@@ -12,7 +12,8 @@ const lost: PreviousRun["findings"][number] = {
   path: "src/a.ts",
   line: 3,
   quote: "console.log(x)",
-  summary: "s"
+  summary: "s",
+  evidence: null
 };
 
 describe("readResult", () => {
@@ -96,7 +97,8 @@ describe("previousRunOf", () => {
           question: "Still?",
           note: null,
           attestation: null,
-          waiver: null
+          waiver: null,
+          evidence: null
         }
       ],
       previous: {

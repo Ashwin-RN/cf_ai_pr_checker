@@ -10,10 +10,12 @@ import {
   assemble,
   countCalls,
   doneMessage,
+  evidenceRequests,
   fetchStage,
   fileStage,
   mapLimit,
   progressFor,
+  readEvidence,
   settleStage
 } from "./checker";
 import { limits } from "./checker/limits";
@@ -22,6 +24,7 @@ import { fitFiles } from "./checker/select";
 import type {
   CheckStatus,
   CrossFileVerdict,
+  EvidenceFile,
   FileCheck,
   Intent,
   Pr,
@@ -48,6 +51,7 @@ export type CheckOutcome =
 type Failed = { failed: CheckFailure };
 type Fetched = { pr: Pr; checked: PrFile[]; notChecked: Skipped[] };
 type FileStep = { file: FileCheck; calls: number };
+type EvidenceStep = { evidence: EvidenceFile; calls: number };
 type Settled = { crossFile: CrossFileVerdict[]; intent: Intent; calls: number };
 
 const STEP = { retries: limits.stepRetries, timeout: limits.stepTimeout };
@@ -171,6 +175,49 @@ export class CheckWorkflow extends AgentWorkflow<
     );
     const results = fileSteps.map((s) => s.file);
 
+    // Files the last check asked for: one step each, like a changed file.
+    const requests = evidenceRequests(
+      input.previous ?? null,
+      ruleSet,
+      fetched.pr
+    );
+    for (const r of requests) {
+      files.push({ path: r.path, state: "queued", role: "evidence" });
+    }
+    const evidenceSteps = await mapLimit(
+      requests,
+      limits.parallelModelCalls,
+      async (request, i) => {
+        const at = fetched.checked.length + i;
+        files[at].state = "checking";
+        await progress(
+          "checking",
+          `Reading ${request.path} as requested evidence`
+        );
+        const done = await step.do(
+          `evidence:${request.path}`,
+          STEP,
+          async (): Promise<EvidenceStep> => {
+            const counted = countCalls(deps.callJson);
+            const evidence = await readEvidence(
+              rules,
+              fetched.pr,
+              request,
+              counted.callJson,
+              deps
+            );
+            return { evidence, calls: counted.calls() };
+          }
+        );
+        const { state } = done.evidence;
+        files[at].state =
+          state === "read" || state === "missing" ? "checked" : "failed";
+        await progress("checking", doneMessage(files));
+        return done;
+      }
+    );
+    const evidence = evidenceSteps.map((s) => s.evidence);
+
     await progress("checking", "Settling rules across files");
     const settled = await step.do(
       "settle",
@@ -181,7 +228,8 @@ export class CheckWorkflow extends AgentWorkflow<
           rules,
           fetched.pr,
           results,
-          counted.callJson
+          counted.callJson,
+          evidence
         );
         return { ...out, calls: counted.calls() };
       }
@@ -196,9 +244,13 @@ export class CheckWorkflow extends AgentWorkflow<
           ruleSet,
           results,
           notChecked: fetched.notChecked,
+          evidence,
           crossFile: settled.crossFile,
           intent: settled.intent,
-          modelCalls: fileSteps.reduce((n, s) => n + s.calls, settled.calls),
+          modelCalls: [...fileSteps, ...evidenceSteps].reduce(
+            (n, s) => n + s.calls,
+            settled.calls
+          ),
           startedAt: input.startedAt,
           finishedAt: Date.now()
         });

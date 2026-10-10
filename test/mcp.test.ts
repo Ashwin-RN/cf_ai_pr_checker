@@ -325,7 +325,8 @@ describe("the MCP server", () => {
         counted: true,
         note: null
       },
-      waiver: null
+      waiver: null,
+      evidence: null
     };
     const given: string[] = [];
     const client = await connect({

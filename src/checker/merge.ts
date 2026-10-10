@@ -378,7 +378,8 @@ function fileDraft(
     question: null,
     note: v.note,
     attestation: null,
-    waiver: null
+    waiver: null,
+    evidence: null
   };
   if (blocks) return draft;
   if (v.verdict === "FAIL" && v.verified) {
@@ -449,7 +450,8 @@ export function buildFindings(
         question: null,
         note: null,
         attestation: null,
-        waiver: null
+        waiver: null,
+        evidence: null
       });
     }
   }
@@ -476,7 +478,9 @@ export function buildFindings(
           .filter(Boolean)
           .join("; ") || null,
       attestation: null,
-      waiver: null
+      waiver: null,
+      // The file the settle step asked for; the next check reads it.
+      evidence: blocks ? null : c.evidencePath
     };
     (blocks ? blocking : questions).push(draft);
   }
@@ -498,7 +502,8 @@ export function buildFindings(
       question: null,
       note: null,
       attestation: null,
-      waiver: null
+      waiver: null,
+      evidence: null
     });
   }
   for (const claim of intent?.unsupported ?? []) {
@@ -519,7 +524,8 @@ export function buildFindings(
       question: null,
       note: null,
       attestation: null,
-      waiver: null
+      waiver: null,
+      evidence: null
     });
   }
   blocking.sort(byRuleThenPath);

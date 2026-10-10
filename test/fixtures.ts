@@ -100,6 +100,7 @@ export function result(extra: Partial<CheckResult> = {}): CheckResult {
     files: [],
     notChecked: [],
     waivers: [],
+    evidence: [],
     coverageComplete: true,
     modelCalls: 0,
     startedAt: 0,

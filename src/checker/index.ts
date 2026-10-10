@@ -1,5 +1,11 @@
 import { assessedBy, diffRun } from "./diff";
-import { GithubError, fetchPr, fetchRawFile, parsePrUrl } from "./github";
+import {
+  GithubError,
+  type RawFile,
+  fetchPr,
+  fetchRawFile,
+  parsePrUrl
+} from "./github";
 import { checkIntent } from "./intent";
 import { limits } from "./limits";
 import {
@@ -14,6 +20,8 @@ import type { JsonCaller } from "./model";
 import {
   confirmPrompt,
   confirmSchema,
+  evidencePrompt,
+  evidenceSchema,
   filePrompt,
   fileOutputSchema,
   type FileOutput
@@ -25,6 +33,7 @@ import type {
   Attestation,
   CheckResult,
   CrossFileVerdict,
+  EvidenceFile,
   FileCheck,
   FileVerdict,
   Intent,
@@ -489,17 +498,102 @@ export async function fileStage(
   );
 }
 
+export type EvidenceRequest = { rule: number; path: string };
+
+// The files the last check asked for, which this one reads: one request per
+// path, up to the cap, and only while the rules are the same set, since the
+// rule a request names is a position in the rules file. A file of the pull
+// request is checked anyway and is not read again as evidence.
+export function evidenceRequests(
+  previous: PreviousRun | null,
+  ruleSet: RuleSet,
+  pr: Pr
+): EvidenceRequest[] {
+  if (!previous || previous.rulesHash !== ruleSet.hash) return [];
+  const seen = new Set<string>();
+  const out: EvidenceRequest[] = [];
+  for (const f of previous.findings) {
+    const path = f.evidence;
+    if (!path || f.rule === null || seen.has(path)) continue;
+    if (pr.files.some((x) => x.path === path)) continue;
+    if (!ruleSet.rules.some((r) => r.id === f.rule)) continue;
+    seen.add(path);
+    out.push({ rule: f.rule, path });
+    if (out.length === limits.evidenceFilesPerCheck) break;
+  }
+  return out;
+}
+
+// Stage 2b, once per requested file: the file at the head commit, and one
+// call for its facts. A file that does not exist is a fact in itself: what
+// the rule asked for is not there.
+export async function readEvidence(
+  rules: Rule[],
+  pr: Pr,
+  request: EvidenceRequest,
+  callJson: JsonCaller,
+  deps: CheckDeps
+): Promise<EvidenceFile> {
+  const base = {
+    rule: request.rule,
+    path: request.path,
+    facts: [] as string[]
+  };
+  const rule = rules.find((r) => r.id === request.rule);
+  if (!rule) {
+    return { ...base, state: "failed", reason: "the rule is not in this set" };
+  }
+  let raw: RawFile;
+  try {
+    raw = await fetchRawFile(pr, pr.headSha, request.path, {
+      fetch: deps.fetch,
+      token: deps.githubToken
+    });
+  } catch (e) {
+    return { ...base, state: "unreadable", reason: (e as Error).message };
+  }
+  if (!raw.ok) {
+    return raw.reason === "not found"
+      ? { ...base, state: "missing", reason: null }
+      : { ...base, state: "unreadable", reason: raw.reason };
+  }
+  const cut = raw.text.length > limits.charsPerModelCall;
+  const content = cut ? raw.text.slice(0, limits.charsPerModelCall) : raw.text;
+  const result = await callJson(
+    evidencePrompt(rule, request.path, content, cut),
+    evidenceSchema
+  );
+  if (!result.ok) return { ...base, state: "failed", reason: result.error };
+  return {
+    ...base,
+    state: "read",
+    facts: [...new Set(result.value.facts.map((f) => f.trim()))]
+      .filter(Boolean)
+      .slice(0, limits.evidenceFacts),
+    reason: cut ? "cut at the size cap" : null
+  };
+}
+
 // Stage 3: rules that span files, and the description against the facts.
+// Requested evidence reaches the settle step only: it describes files the
+// pull request does not change, which the description need not mention.
 export async function settleStage(
   rules: Rule[],
   pr: Pr,
   results: FileCheck[],
-  callJson: JsonCaller
+  callJson: JsonCaller,
+  evidence: EvidenceFile[] = []
 ): Promise<{ crossFile: CrossFileVerdict[]; intent: Intent }> {
-  const facts = collectFacts(pr, results);
   const [crossFile, intent] = await Promise.all([
-    settleCrossFile(rules, pr, results, facts, callJson),
-    checkIntent(pr, facts, callJson)
+    settleCrossFile(
+      rules,
+      pr,
+      results,
+      collectFacts(pr, results, evidence),
+      callJson,
+      evidence
+    ),
+    checkIntent(pr, collectFacts(pr, results), callJson)
   ]);
   return { crossFile, intent };
 }
@@ -510,6 +604,7 @@ export type Assembly = {
   ruleSet: RuleSet;
   results: FileCheck[];
   notChecked: Skipped[];
+  evidence?: EvidenceFile[];
   crossFile: CrossFileVerdict[];
   intent: Intent;
   modelCalls: number;
@@ -521,13 +616,14 @@ export type Assembly = {
 // last run, shape the result. Pure.
 export function assemble(a: Assembly): CheckResult {
   const { input, pr, ruleSet, results, notChecked, crossFile, intent } = a;
+  const evidence = a.evidence ?? [];
   const strict = input.strict ?? false;
   const gated = gateCrossFile(
     ruleSet.rules,
     crossFile,
     results,
     notChecked,
-    factsCut(pr, results),
+    factsCut(pr, results, evidence),
     strict
   );
   // Answers settle questions after the merge and before the diff, so an
@@ -581,6 +677,7 @@ export function assemble(a: Assembly): CheckResult {
     previous: diffed.previous,
     files: results,
     notChecked,
+    evidence,
     waivers,
     // Complete when no rule has a file in its scope the check did not cover
     // for it; a skipped file no rule needed is not a gap. A waiver does not
@@ -668,12 +765,39 @@ export async function runCheck(
     }
   );
 
+  // Files the last check asked for, read now so the settle step sees them.
+  const requests = evidenceRequests(input.previous ?? null, ruleSet, pr);
+  for (const r of requests) {
+    files.push({ path: r.path, state: "queued", role: "evidence" });
+  }
+  const evidence = await mapLimit(
+    requests,
+    limits.parallelModelCalls,
+    async (request, i) => {
+      const at = checked.length + i;
+      files[at].state = "checking";
+      progress("checking", `Reading ${request.path} as requested evidence`);
+      const out = await readEvidence(
+        ruleSet.rules,
+        pr,
+        request,
+        counted.callJson,
+        deps
+      );
+      files[at].state =
+        out.state === "read" || out.state === "missing" ? "checked" : "failed";
+      progress("checking", doneMessage(files));
+      return out;
+    }
+  );
+
   progress("checking", "Settling rules across files");
   const { crossFile, intent } = await settleStage(
     ruleSet.rules,
     pr,
     results,
-    counted.callJson
+    counted.callJson,
+    evidence
   );
   const result = assemble({
     input,
@@ -681,6 +805,7 @@ export async function runCheck(
     ruleSet,
     results,
     notChecked,
+    evidence,
     crossFile,
     intent,
     modelCalls: counted.calls(),

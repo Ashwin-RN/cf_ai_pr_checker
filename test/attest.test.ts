@@ -39,6 +39,7 @@ const question = (
   note: null,
   attestation: null,
   waiver: null,
+  evidence: null,
   ...extra
 });
 

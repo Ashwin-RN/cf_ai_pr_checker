@@ -49,6 +49,7 @@ const settle = (
   resolution: null,
   question: null,
   note: null,
+  evidencePath: null,
   ...extra
 });
 
@@ -646,7 +647,8 @@ describe("buildFindings", () => {
         steps: ["add a test"],
         resolution: "a test for f",
         question: null,
-        note: null
+        note: null,
+        evidencePath: null
       }
     ];
     const findings = buildFindings(crossRules, files, crossFile);

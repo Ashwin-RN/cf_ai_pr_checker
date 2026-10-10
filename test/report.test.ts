@@ -20,7 +20,8 @@ const finding: Finding = {
   question: null,
   note: null,
   attestation: null,
-  waiver: null
+  waiver: null,
+  evidence: null
 };
 
 describe("renderReport", () => {
