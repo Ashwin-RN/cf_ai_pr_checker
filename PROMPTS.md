@@ -236,3 +236,26 @@ The Workers AI cap from the day before had not lifted at 03:00 UTC despite the d
 - Before spending any budget, the API was given an optional `checkId` and `GET /api/checks/<id>` learned to answer 202 while a check runs, so the eval runner can read a check back if the connection drops; verified at no cost with bad ids, a bad link and an unknown id.
 - The first run: 66 model calls, no false PASS and no false FAIL, but five wrong statuses and 24 UNSURE rules with one cause, read from the raw verdicts in the local Durable Object database rather than from another run. A file is checked against the rules that apply to its path, so the model saw rule numbers with gaps and closed them, shifting every verdict after the gap. The rules now go to the model numbered as listed and are mapped back in code; three cases were run again to confirm it.
 - The second full run: 67 calls, no false PASS, no false FAIL, one wrong status. The three rules still off are questions the report asks, listed with the table in the README.
+
+## 2026-10-10: M5, exceptions, evidence, rules by code, statistics, the panel
+
+**Prompt:**
+
+> Then start M5 on a new branch from main, in this order:
+>
+> 1. Exceptions: a waive_rule tool and API route that records a rule as waived for a pull request with a reason, shown in the report and never under strict.
+> 2. Questions that request verifiable evidence: when a cross-file rule is unsettled, name the file whose contents would settle it and fetch it on the next run.
+> 3. Mechanical rules by code before the model, starting with the pinned-action rule.
+> 4. Rule statistics per workspace.
+> 5. UI last.
+>
+> Constraints: Workers AI Free plan, about 165 calls a day on the fixtures; unit tests and the build spend nothing, so build everything first and spend calls only on one eval run at the end. Keep the README and PROMPTS.md honest.
+
+**What came out of it:** the branch `m5-exceptions`, built from the eval branch so it carries the rule-numbering fix, one commit per item, each with its tests, at no model cost. The day's budget had already gone on the eval runs, and the account's usage analytics fit a rolling 24-hour window better than a midnight reset, so the eval run on the new code waits for the window to reopen.
+
+- A waiver names a rule of the last finished check of a pull request and keeps the reason. The next check shows the rule's evidence as found, marks the rule and its items waived, and neither blocks on it nor leaves the check unsure; it counts for nothing under strict, is stale once the rules change, and is marked when the head has moved. Revoking keeps it on record. Served over MCP, the API and the chat, with a preview of what the last check gives once every answer and waiver is applied. CI's `verified` stays red on a waived rule.
+- An UNSURE verdict across files now names the one file, outside the pull request, whose contents would settle it; code keeps the path only when it is relative, inside the repository, not a file of the pull request and not one already read. The next check reads up to three such files, one facts-only call each, and hands the facts to the settle step marked as requested evidence, a missing file included, so the step can fail on an absence. The field is optional in the schema, so a model that leaves it out still returns a valid answer; evidence never reaches the intent comparison; as a Workflow each file is a step.
+- The rule that asks that actions in workflows be pinned is recognised from its text and decided by code over the whole file: every `uses:` line must name a version tag or a commit SHA, the first loose line is quoted with its origin from the diff, and the verdict gets no second look. The model is asked about the remaining rules only, numbered over that shorter list, which is the same gap the eval day's fix closed and had to be kept closed here. A file whose rules are all checked by pattern costs no model call, and when the model cannot answer the pattern verdicts hold.
+- Statistics per rule, told apart by text since numbers are positions: checks, PASS, FAIL, UNSURE, NA, blocking, waived, attested, and an ambiguity flag at more than half UNSURE over five or more checks. Against the local eval workspace it flagged the secrets rule from the renumbering-era runs.
+- A workspace panel in the chat page with the rules as interpreted, every check with its stored report rendered by the same code as the chat's, and the statistics, read over the agent's callable methods. Type-checked and built, not viewed in a browser.
+- Live on a local server with no model calls: `GET /api/stats` over the three eval runs, waive by pull request link, a bad rule number and a missing reason refused, revoke by check id, and a second revoke refused.
