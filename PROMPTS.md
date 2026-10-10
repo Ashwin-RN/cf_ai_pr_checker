@@ -218,3 +218,21 @@ The Workers AI cap from the day before had not lifted at 03:00 UTC despite the d
 - A result stored by an earlier build is filled in on read instead of failing to render.
 - A client-supplied check id is kept apart per workspace inside the Workflow, whose instance ids are unique per Workflow.
 - An answer that cites a pull request link is recorded as an answer, not run as a check.
+
+## 2026-10-10: The first eval run
+
+**Prompt:**
+
+> whats pending for us? its a new day.
+
+**What came out of it:** a check that the Workers AI daily cap had cleared (a two-token probe on the smallest model, then the usage analytics), and the order for the day: the evaluation set first, the README's sample report and results table from it, then the next milestone.
+
+**Prompt:**
+
+> go
+
+**What came out of it:** the first full run of the eleven cases, then a fix, then the run again.
+
+- Before spending any budget, the API was given an optional `checkId` and `GET /api/checks/<id>` learned to answer 202 while a check runs, so the eval runner can read a check back if the connection drops; verified at no cost with bad ids, a bad link and an unknown id.
+- The first run: 66 model calls, no false PASS and no false FAIL, but five wrong statuses and 24 UNSURE rules with one cause, read from the raw verdicts in the local Durable Object database rather than from another run. A file is checked against the rules that apply to its path, so the model saw rule numbers with gaps and closed them, shifting every verdict after the gap. The rules now go to the model numbered as listed and are mapped back in code; three cases were run again to confirm it.
+- The second full run: 67 calls, no false PASS, no false FAIL, one wrong status. The three rules still off are questions the report asks, listed with the table in the README.

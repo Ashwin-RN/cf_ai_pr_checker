@@ -33,7 +33,64 @@ that is still open is the same item, and an answered one stays answered.
 
 A report from a run against a fixture pull request that adds one file with a `console.log` call:
 
-A full sample report from a run with a fresh Workers AI budget is still to be added here; the shape is described under "The report" below.
+```markdown
+# PR check · Ashwin-RN/pr-check-fixtures#2 · FAIL
+
+How to use this report: work through Blocking, then Questions, then Warnings. Each item gives steps to run against your own code and the condition the next check verifies. After pushing, run the same check again: keys stay the same across runs, and each item says whether it is new or still open. A blocking item marked pre-existing sits on a line this pull request does not change; it is reported but does not fail the check unless strict. A question can be answered when the rule is met in a way the check cannot see; an item marked answered is settled by that answer and counts as a pass unless strict.
+
+## Status
+
+**FAIL.** 1 of 5 rules fail on lines this pull request adds.
+
+Checked 2 of 2 changed files against 5 rules from pr-rules.md in Ashwin-RN/pr-check-fixtures (main) (set `651ff4130d397450`) at `96ce33c`.
+
+Since the last check at `96ce33c`: 0 new, 1 still open, 2 resolved (Q1 `4093173f` src/format.ts, Q2 `3cb9d4b5` src/format.ts).
+
+| Rule | Text                                                                                          | Status | Detail                            |
+| ---- | --------------------------------------------------------------------------------------------- | ------ | --------------------------------- |
+| 1    | No `console.log` or `console.debug` calls in files under src/                                 | FAIL   | fails in src/format.ts:3          |
+| 2    | Every workflow under .github/workflows/ pins each action to a major version tag such as `@v4` | NA     | not triggered by this PR          |
+| 3    | No secret values are hardcoded; references like `secrets.X` and `process.env.X` are fine      | PASS   | passes in 2 files                 |
+| 4    | Every new exported function under src/ has a test under test/                                 | PASS   | settled across files from 3 facts |
+| 5    | No `TODO` comment without a link to an issue                                                  | PASS   | passes in 2 files                 |
+
+## Blocking
+
+### F1 · rule 1 · src/format.ts:3 · key e133ce54 · still open
+
+> `console.log("format", text);`
+
+**Reason:** The file contains a console.log call.
+
+**Why:** This rule protects against accidental logging of sensitive information in production.
+
+**Steps:**
+
+1. Check the file for console.log calls.
+2. Check the file for console.debug calls.
+3. Remove any console.log or console.debug calls.
+4. Verify the file has no console.log or console.debug calls.
+
+**Resolved when:** Remove the console.log call.
+
+## Questions
+
+none
+
+## Warnings
+
+none
+
+## Not checked
+
+none
+
+## Intent
+
+The description accurately matches the facts, as it mentions adding a format function and a test, which is confirmed by the added files and their contents.
+```
+
+This is the second run of the day on that pull request, so the Status section also says what changed since the first: the two questions the first run raised are resolved, and the blocking item is the same item, still open.
 
 ## How it meets the assignment
 
@@ -131,7 +188,31 @@ CHECKER_URL=http://localhost:5173 API_TOKEN=dev-token npm run eval
 
 It prints one row per case and exits non-zero on any false PASS: a rule that should have failed or needed an answer but came back PASS, a rule the case says must block that does not, whatever its verdict, or a check that should fail or stay unsure and passes. It also exits non-zero on any case it could not score: an error from the checker, a rule missing from the answer, a fixture whose head commit has moved, or a `--only` that matches nothing.
 
-The results table is still to be added: the first full run against the fixtures is waiting on a day of Workers AI budget, which one run uses up.
+Results of the run on 2026-10-10 against a local dev server, Llama 3.3 70B on Workers AI, 67 model calls in 296 seconds, about 4,000 neurons of the free plan's 10,000 a day:
+
+| Case              | Status | Expected | Rules off                              | Broken | False PASS | False FAIL | Missed | UNSURE | Calls | Time  |
+| ----------------- | ------ | -------- | -------------------------------------- | ------ | ---------- | ---------- | ------ | ------ | ----- | ----- |
+| clean             | pass   | pass     | none                                   | none   | 0          | 0          | 0      | 0      | 4     | 14.1s |
+| console-log       | fail   | fail     | none                                   | none   | 0          | 0          | 0      | 0      | 5     | 17s   |
+| injection         | fail   | fail     | none                                   | none   | 0          | 0          | 0      | 0      | 5     | 16.7s |
+| near-duplicate    | fail   | fail     | none                                   | none   | 0          | 0          | 0      | 0      | 5     | 18.8s |
+| mechanical        | fail   | fail     | none                                   | none   | 0          | 0          | 0      | 0      | 5     | 20.4s |
+| pre-existing      | pass   | pass     | none                                   | none   | 0          | 0          | 0      | 0      | 5     | 20.5s |
+| no-test           | unsure | fail     | 4: UNSURE not FAIL                     | none   | 0          | 0          | 1      | 1      | 3     | 14.6s |
+| workflow-unpinned | fail   | fail     | 3: UNSURE not PASS; 5: UNSURE not PASS | none   | 0          | 0          | 0      | 2      | 3     | 10.6s |
+| secret            | fail   | fail     | none                                   | none   | 0          | 0          | 0      | 0      | 5     | 18.4s |
+| big-file          | fail   | fail     | 4: UNSURE not NA                       | none   | 0          | 0          | 0      | 1      | 5     | 31s   |
+| over-cap          | unsure | unsure   | none                                   | none   | 0          | 0          | 0      | 4      | 22    | 114s  |
+
+11 cases, 1 with the wrong status, 0 broken. False PASS 0, false FAIL 0, missed 1, UNSURE rules 8.
+
+No case passed wrongly and none failed wrongly. The rules that came back UNSURE where the case expected something else are each a question the report asks, not a verdict:
+
+- `no-test`: the cross-file step answered "no fact shows a test for parseId" as a question rather than a failure. The model is cautious on a failure it settles from facts alone; the status is unsure, so CI's `verified` check stays red, but `rules` does not block.
+- `workflow-unpinned`: on the YAML file the model returned the one failing verdict and no verdict for the two rules it passed. A verdict the model does not give is a question, never a pass.
+- `big-file`: the model called two modified functions new and asked for their tests. The rule concerns new exported functions, so the case expects NA.
+
+The first run of the same day, before one fix, had the same cases, 66 calls and no false PASS, but five wrong statuses and 24 UNSURE rules with one cause: a file is checked against the rules that apply to its path, so the model saw a list with gaps in its numbers (1, 3, 4, 5) and closed the gaps, shifting every verdict after one. The rules are now numbered as listed and mapped back in code; this table is the run after that change.
 
 ## Run it locally
 
